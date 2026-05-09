@@ -126,17 +126,26 @@ def predict(pipeline: Pipeline,
             X_latest: pd.DataFrame,
             min_confidence: int = 55) -> dict:
     """
-    پیش‌بینی سیگنال برای آخرین کندل
+    پیش‌بینی سیگنال برای آخرین کندل.
 
-    Returns:
-        dict با کلیدهای: type, confidence, probabilities, features_used
+    ⚠️ مدل دقیقاً همان ستون‌هایی را می‌خواهد که در آموزش دیده.
+       اگر ستونی وجود نداشت، با ۰ پر می‌کنیم — بهتر از crash.
     """
-    # آماده‌سازی آخرین ردیف
-    row = X_latest[feature_cols].dropna(axis=1).iloc[[-1]]
+    # آخرین ردیف
+    row = X_latest.iloc[[-1]].copy()
 
-    # فقط ستون‌هایی که مدل می‌شناسد
-    common_cols = [c for c in feature_cols if c in row.columns]
-    row = row[common_cols]
+    # اطمینان از وجود تمام ستون‌های آموزشی — ستون‌های گمشده با ۰ پر می‌شوند
+    missing = [c for c in feature_cols if c not in row.columns]
+    if missing:
+        logger.warning(f"ستون‌های گمشده ({len(missing)}) با ۰ پر شدند: {missing[:5]}...")
+        for c in missing:
+            row[c] = 0.0
+
+    # انتخاب دقیقاً همان ستون‌ها با همان ترتیب آموزش
+    row = row[feature_cols]
+
+    # NaN باقیمانده را با ۰ پر کن (برای اندیکاتورهایی که کندل کافی نداشتند)
+    row = row.fillna(0.0)
 
     # پیش‌بینی
     proba = pipeline.predict_proba(row)[0]
@@ -158,3 +167,4 @@ def predict(pipeline: Pipeline,
         "probabilities": proba_dict,
         "raw_prediction": LABEL_MAP[best_class]
     }
+              
