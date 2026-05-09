@@ -115,8 +115,12 @@ def generate_signal() -> dict:
     # محاسبه ویژگی‌ها
     X = build_feature_matrix(df_1h, df_4h)
 
+    # هم‌راستا کردن ستون‌های داده جدید با ستون‌های زمان آموزش
+    # این کار از خطا جلوگیری می‌کند اگر برخی ویژگی‌ها در داده جدید محاسبه نشوند
+    X_aligned = X.reindex(columns=feature_cols, fill_value=np.nan)
+
     # پیش‌بینی
-    prediction = predict(pipeline, feature_cols, X, min_confidence=MIN_CONFIDENCE)
+    prediction = predict(pipeline, feature_cols, X_aligned, min_confidence=MIN_CONFIDENCE)
 
     signal_type = prediction["type"]
     confidence  = prediction["confidence"]
