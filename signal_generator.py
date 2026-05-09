@@ -109,45 +109,34 @@ def generate_signal() -> dict:
     pipeline, feature_cols = load_model()
 
     # دریافت داده تازه
-    df_1h = fetch_ohlcv(SYMBOL, "1h", limit=500)
-    df_4h = fetch_ohlcv(SYMBOL, "4h", limit=300)
+    # ⚠️ 4H باید حداقل ۲۵۰ کندل داشته باشد تا EMA200 حساب شود
+    df_1h = fetch_ohlcv(SYMBOL, "1h", limit=600)
+    df_4h = fetch_ohlcv(SYMBOL, "4h", limit=500)
 
-    # محاسبه ویژگی‌ها برای مدل
+    # محاسبه ویژگی‌ها
     X = build_feature_matrix(df_1h, df_4h)
-    X_aligned = X.reindex(columns=feature_cols, fill_value=np.nan)
 
     # پیش‌بینی
-    prediction = predict(pipeline, feature_cols, X_aligned, min_confidence=MIN_CONFIDENCE)
-
-    # محاسبه تمام اندیکاتورها برای گرفتن ATR و ساختن دلیل
-    df_1h_indicators = compute_indicators(df_1h)
-    last_candle = df_1h_indicators.iloc[-1]
+    prediction = predict(pipeline, feature_cols, X, min_confidence=MIN_CONFIDENCE)
 
     signal_type = prediction["type"]
     confidence  = prediction["confidence"]
     probabilities = prediction["probabilities"]
 
-    # قیمت فعلی و ATR از دیتفریم کامل
-    price = float(last_candle["close"])
-    atr   = float(last_candle.get("atr", 0.0)) # Use .get() for safety
+    # قیمت فعلی و ATR
+    price = float(df_1h["close"].iloc[-1])
+    atr   = float(df_1h["close"].diff().abs().rolling(14).mean().iloc[-1])
 
-    # اگر ATR صفر باشد، سیگنال نده
-    if atr == 0.0:
+    # SL / TP
+    sl, tp1, tp2 = _calculate_sl_tp(price, atr, signal_type)
+
+    # بررسی Risk/Reward
+    if signal_type != "WAIT" and not _risk_reward_ok(price, sl, tp1):
+        reason = f"ریسک به ریوارد کافی نیست (min 1.8). ML پیش‌بینی {prediction['raw_prediction']} داد."
         signal_type = "WAIT"
-        reason = "ATR معتبر برای محاسبه SL/TP وجود ندارد."
-        sl, tp1, tp2 = None, None, None
+        sl = tp1 = tp2 = None
     else:
-        # SL / TP
-        sl, tp1, tp2 = _calculate_sl_tp(price, atr, signal_type)
-
-        # بررسی Risk/Reward
-        if signal_type != "WAIT" and not _risk_reward_ok(price, sl, tp1):
-            reason = f"ریسک به ریوارد کافی نیست (min 1.8). ML پیش‌بینی {prediction['raw_prediction']} داد."
-            signal_type = "WAIT"
-            sl = tp1 = tp2 = None
-        else:
-            reason = _build_reason(prediction, df_1h_indicators)
-
+        reason = _build_reason(prediction, df_1h)
 
     signal = {
         "type":          signal_type,
@@ -166,9 +155,10 @@ def generate_signal() -> dict:
     return signal
 
 
-def _build_reason(prediction: dict, df_with_indicators: pd.DataFrame) -> str:
-    """ساخت توضیح فارسی برای سیگنال با استفاده از دیتفریم از قبل محاسبه شده"""
-    last = df_with_indicators.iloc[-1]
+def _build_reason(prediction: dict, df: pd.DataFrame) -> str:
+    """ساخت توضیح فارسی برای سیگنال"""
+    df_ind = compute_indicators(df)
+    last = df_ind.iloc[-1]
     parts = []
 
     rsi = last.get("rsi", None)
