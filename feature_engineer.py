@@ -75,7 +75,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # ─── حجم (Volume) ───────────────────────────────────────
     df["obv"]  = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
-    df["vwap"] = ta.volume.VolumeWeightedAveragePrice(h, l, c, v).volume_weighted_average_price()
+    df["vwap"] = ta.volume.VolumeWeightedAveragePriceIndicator(h, l, c, v).volume_weighted_average_price()
 
     # نسبت حجم نسبت به میانگین ۲۰ کندل
     df["vol_ratio"] = v / v.rolling(20).mean()
@@ -148,8 +148,12 @@ def build_feature_matrix(df_1h: pd.DataFrame,
     if df_4h is not None:
         feature_cols += [c for c in df_1h.columns if c.startswith("4h_")]
 
-    available = [c for c in feature_cols if c in df_1h.columns]
-    return df_1h[available].copy()
+    # اطمینان از وجود تمام ستون‌ها — ستون‌های گمشده با NaN پر می‌شوند
+    for c in feature_cols:
+        if c not in df_1h.columns:
+            df_1h[c] = np.nan
+
+    return df_1h[feature_cols].copy()
 
 
 def create_labels(df_1h: pd.DataFrame,
