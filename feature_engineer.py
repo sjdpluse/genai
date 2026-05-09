@@ -75,7 +75,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # ─── حجم (Volume) ───────────────────────────────────────
     df["obv"]  = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
-    df["vwap"] = ta.volume.VolumeWeightedAveragePriceIndicator(h, l, c, v).volume_weighted_average_price()
+    df["vwap"] = ta.volume.VolumeWeightedAveragePrice(h, l, c, v).volume_weighted_average_price()
 
     # نسبت حجم نسبت به میانگین ۲۰ کندل
     df["vol_ratio"] = v / v.rolling(20).mean()
