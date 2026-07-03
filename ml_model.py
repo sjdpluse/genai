@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.pipeline import Pipeline
+from sklearn.calibration import CalibratedClassifierCV
 
 from config import MODEL_PATH, SCALER_PATH
 
@@ -25,28 +26,12 @@ logger = logging.getLogger(__name__)
 LABEL_MAP = {-1: "SHORT", 0: "WAIT", 1: "LONG"}
 
 
-def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
+def _build_pipeline() -> Pipeline:
     """
-    آموزش مدل با Time-Series Cross Validation
-    (از آینده برای گذشته استفاده نمی‌کنیم — lookahead bias نداریم)
-
-    Returns:
-        (pipeline, metrics_dict)
+    فکتوری Pipeline — تا هایپرپارامترها فقط در یک‌جا تعریف شوند
+    (هم برای مدل اصلی و هم برای کالیبراسیون استفاده می‌شود، DRY).
     """
-    # حذف NaN‌های اول (ناشی از محاسبه اندیکاتورها)
-    valid_idx = X.dropna().index.intersection(y.dropna().index)
-
-    # حذف N کندل آخر که برچسب‌شان قابل اعتماد نیست
-    valid_idx = valid_idx[:-10]
-
-    X_clean = X.loc[valid_idx]
-    y_clean = y.loc[valid_idx]
-
-    logger.info(f"آموزش روی {len(X_clean)} نمونه")
-    logger.info(f"توزیع کلاس‌ها:\n{y_clean.value_counts()}")
-
-    # Pipeline: Scaler + RandomForest
-    pipeline = Pipeline([
+    return Pipeline([
         ("scaler", StandardScaler()),
         ("clf", RandomForestClassifier(
             n_estimators=300,
@@ -58,6 +43,35 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
             n_jobs=-1                  # استفاده از همه هسته‌های CPU
         ))
     ])
+
+
+def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
+    """
+    آموزش مدل با Time-Series Cross Validation
+    (از آینده برای گذشته استفاده نمی‌کنیم — lookahead bias نداریم)
+
+    Returns:
+        (model, metrics_dict)  — model ممکن است Pipeline کالیبره‌شده باشد
+    """
+    # حذف NaN‌ها — شامل ردیف‌های ابتدایی (اندیکاتورهایی که هنوز lookback
+    # کافی ندارند) و ردیف‌های انتهایی که برچسب‌شان به‌دلیل نیاز به
+    # forward_candles کندل آینده هنوز NaN است (رجوع کنید به
+    # feature_engineer.create_labels — دیگر مثل قبل به‌اشتباه WAIT نیستند)
+    valid_idx = X.dropna().index.intersection(y.dropna().index)
+
+    X_clean = X.loc[valid_idx]
+    y_clean = y.loc[valid_idx]
+
+    if len(X_clean) < 200:
+        raise ValueError(
+            f"داده تمیز کافی برای آموزش وجود ندارد ({len(X_clean)} نمونه). "
+            "limit را در run_training افزایش دهید یا محدودیت‌های اندیکاتورها را بررسی کنید."
+        )
+
+    logger.info(f"آموزش روی {len(X_clean)} نمونه")
+    logger.info(f"توزیع کلاس‌ها:\n{y_clean.value_counts()}")
+
+    pipeline = _build_pipeline()
 
     # ─── Walk-Forward Validation ─────────────────────────────
     # تقسیم‌بندی زمانی — مدل هرگز آینده را نمی‌بیند
@@ -77,7 +91,7 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
     avg_score = np.mean(fold_scores)
     logger.info(f"میانگین accuracy در cross-validation: {avg_score:.3f}")
 
-    # ─── آموزش نهایی روی تمام داده ──────────────────────────
+    # ─── آموزش نهایی روی تمام داده (برای feature importance و به‌عنوان fallback) ──
     pipeline.fit(X_clean, y_clean)
 
     # گزارش کامل روی داده آموزش
@@ -94,20 +108,47 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
     }).sort_values("importance", ascending=False)
     logger.info(f"۱۰ ویژگی مهم‌تر:\n{importance_df.head(10).to_string()}")
 
+    # ─── کالیبراسیون احتمالات (Confidence Calibration) ──────
+    # predict_proba در RandomForest یعنی «سهم آرای درخت‌ها»، نه احتمال
+    # واقعیِ کالیبره‌شده. برای این‌که عدد confidence که در سیگنال نهایی
+    # نمایش داده می‌شود واقعاً قابل‌اتکا باشد (وقتی مدل ۷۰٪ می‌گوید،
+    # واقعاً حدود ۷۰٪ از دفعات درست باشد)، یک کالیبراسیون Sigmoid
+    # (Platt Scaling) با اعتبارسنجی walk-forward روی آن اعمال می‌کنیم.
+    # اگر به هر دلیلی (مثلاً حجم دادهٔ ناکافی برای یکی از کلاس‌ها در
+    # یکی از fold ها) کالیبراسیون شکست بخورد، بدون کرش، به مدل خام
+    # (uncalibrated) برمی‌گردیم — سیستم هرگز نباید به‌خاطر این مرحله
+    # از کار بیفتد.
+    final_model = pipeline
+    calibrated = False
+    try:
+        calib_cv = TimeSeriesSplit(n_splits=3)
+        calibrated_pipeline = CalibratedClassifierCV(
+            estimator=_build_pipeline(),
+            method="sigmoid",
+            cv=calib_cv,
+        )
+        calibrated_pipeline.fit(X_clean, y_clean)
+        final_model = calibrated_pipeline
+        calibrated = True
+        logger.info("کالیبراسیون احتمالات (Platt Scaling) با موفقیت انجام شد.")
+    except Exception as e:
+        logger.warning(f"کالیبراسیون احتمالات ناموفق بود — از مدل خام استفاده می‌شود: {e}")
+
     metrics = {
         "cv_accuracy": round(avg_score, 3),
         "fold_scores": [round(s, 3) for s in fold_scores],
         "n_samples": len(X_clean),
-        "feature_importance": importance_df.head(10).to_dict("records")
+        "feature_importance": importance_df.head(10).to_dict("records"),
+        "calibrated": calibrated,
     }
 
-    return pipeline, metrics
+    return final_model, metrics
 
 
-def save_model(pipeline: Pipeline, feature_cols: list) -> None:
-    """ذخیره مدل آموزش‌دیده + لیست ویژگی‌ها"""
+def save_model(model, feature_cols: list) -> None:
+    """ذخیره مدل آموزش‌دیده (Pipeline یا CalibratedClassifierCV) + لیست ویژگی‌ها"""
     os.makedirs("model", exist_ok=True)
-    joblib.dump({"pipeline": pipeline, "features": feature_cols}, MODEL_PATH)
+    joblib.dump({"pipeline": model, "features": feature_cols}, MODEL_PATH)
     logger.info(f"مدل ذخیره شد: {MODEL_PATH}")
 
 
@@ -121,28 +162,46 @@ def load_model() -> tuple:
     return data["pipeline"], data["features"]
 
 
-def predict(pipeline: Pipeline,
+def predict(pipeline,
             feature_cols: list,
             X_latest: pd.DataFrame,
             min_confidence: int = 55) -> dict:
     """
-    پیش‌بینی سیگنال برای آخرین کندل
+    پیش‌بینی سیگنال برای آخرین کندل.
 
-    Returns:
-        dict با کلیدهای: type, confidence, probabilities, features_used
+    ⚠️ مدل دقیقاً همان ستون‌هایی را می‌خواهد که در آموزش دیده.
+       اگر ستونی وجود نداشت، با ۰ پر می‌کنیم — بهتر از crash، اما
+       این وضعیت باید در لاگ هشدار داده شود چون معمولاً نشانهٔ
+       ناهماهنگی بین نسخهٔ feature_engineer آموزش و inference است.
     """
-    # آماده‌سازی آخرین ردیف
-    row = X_latest[feature_cols].dropna(axis=1).iloc[[-1]]
+    # آخرین ردیف
+    row = X_latest.iloc[[-1]].copy()
 
-    # فقط ستون‌هایی که مدل می‌شناسد
-    common_cols = [c for c in feature_cols if c in row.columns]
-    row = row[common_cols]
+    # اطمینان از وجود تمام ستون‌های آموزشی — ستون‌های گمشده با ۰ پر می‌شوند
+    missing = [c for c in feature_cols if c not in row.columns]
+    if missing:
+        logger.warning(
+            f"⚠️ ناسازگاری نسخهٔ ویژگی‌ها: {len(missing)} ستون در inference وجود ندارند "
+            f"ولی مدل با آن‌ها آموزش دیده — با ۰ پر می‌شوند (توصیه: مدل را دوباره آموزش دهید): "
+            f"{missing[:5]}..."
+        )
+        for c in missing:
+            row[c] = 0.0
+
+    # انتخاب دقیقاً همان ستون‌ها با همان ترتیب آموزش
+    row = row[feature_cols]
+
+    # NaN باقیمانده را با ۰ پر کن (برای اندیکاتورهایی که کندل کافی نداشتند)
+    n_nan = int(row.isna().sum().sum())
+    if n_nan > 0:
+        logger.warning(f"⚠️ {n_nan} مقدار NaN در ویژگی‌های آخرین کندل با ۰ پر شد.")
+    row = row.fillna(0.0)
 
     # پیش‌بینی
     proba = pipeline.predict_proba(row)[0]
     classes = pipeline.classes_   # [-1, 0, 1]
 
-    proba_dict = {LABEL_MAP[c]: round(float(p) * 100, 1)
+    proba_dict = {LABEL_MAP[int(c)]: round(float(p) * 100, 1)
                   for c, p in zip(classes, proba)}
 
     # کلاس با بیشترین احتمال
@@ -150,11 +209,11 @@ def predict(pipeline: Pipeline,
     confidence = round(float(np.max(proba)) * 100, 1)
 
     # اگر confidence کافی نیست → WAIT
-    signal_type = LABEL_MAP[best_class] if confidence >= min_confidence else "WAIT"
+    signal_type = LABEL_MAP[int(best_class)] if confidence >= min_confidence else "WAIT"
 
     return {
         "type": signal_type,
         "confidence": confidence,
         "probabilities": proba_dict,
-        "raw_prediction": LABEL_MAP[best_class]
+        "raw_prediction": LABEL_MAP[int(best_class)]
     }
