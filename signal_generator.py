@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 
 from config import (SYMBOL, ATR_SL_MULTIPLIER,
                     ATR_TP1_MULTIPLIER, ATR_TP2_MULTIPLIER,
-                    MIN_CONFIDENCE, LABEL_LONG_THRESHOLD,
-                    LABEL_SHORT_THRESHOLD, LABEL_FORWARD_CANDLES)
+                    MIN_CONFIDENCE, MIN_RISK_REWARD,
+                    LABEL_LONG_THRESHOLD, LABEL_SHORT_THRESHOLD,
+                    LABEL_FORWARD_CANDLES)
 from data_fetcher import fetch_ohlcv, fetch_multi_timeframe, get_current_price
 from feature_engineer import compute_indicators, build_feature_matrix, create_labels
 from ml_model import load_model, predict, train_model, save_model
@@ -40,15 +41,25 @@ def _calculate_sl_tp(price: float, atr: float,
 
 
 def _risk_reward_ok(price: float, sl: float,
-                    tp1: float, min_rr: float = 1.8) -> bool:
-    """بررسی نسبت ریسک به ریوارد"""
+                    tp1: float, min_rr: float = MIN_RISK_REWARD) -> bool:
+    """
+    بررسی نسبت ریسک به ریوارد.
+
+    ⚠️ min_rr باید <= (ATR_TP1_MULTIPLIER / ATR_SL_MULTIPLIER) باشد.
+    با ضرایب فعلی کانفیگ (TP1=3.0 / SL=1.8) نسبت واقعی ثابت و برابر با
+    ۱.۶۶۷ است، پس هر مقداری بالاتر از آن باعث می‌شود این فیلتر برای
+    همیشه رد شود — این دقیقاً همان باگی بود که سیستم را همیشه WAIT
+    نگه می‌داشت (قبلاً min_rr=1.8 هاردکد شده بود).
+    """
     if sl is None or tp1 is None:
         return False
     risk   = abs(price - sl)
     reward = abs(tp1 - price)
     if risk == 0:
         return False
-    return (reward / risk) >= min_rr
+    rr = reward / risk
+    logger.info(f"بررسی Risk/Reward: risk={risk:.2f} reward={reward:.2f} rr={rr:.3f} (min={min_rr})")
+    return rr >= min_rr
 
 
 def run_training(limit: int = 5000) -> dict:
@@ -94,8 +105,8 @@ def run_training(limit: int = 5000) -> dict:
 def generate_signal() -> dict:
     """
     تولید سیگنال لحظه‌ای:
-    1. دریافت آخرین کندل‌ها
-    2. محاسبه اندیکاتورها
+    1. دریافت آخرین کندل‌های بسته‌شده
+    2. محاسبه اندیکاتورها (از جمله ATR واقعی)
     3. پیش‌بینی با مدل ML
     4. محاسبه SL/TP
     5. بازگشت دیکشنری سیگنال
@@ -108,12 +119,13 @@ def generate_signal() -> dict:
     # بارگذاری مدل
     pipeline, feature_cols = load_model()
 
-    # دریافت داده تازه
+    # دریافت داده تازه — fetch_ohlcv به‌صورت پیش‌فرض کندل بازِ (بسته‌نشده)
+    # انتهایی را حذف می‌کند تا اندیکاتورها روی داده «ناقص» محاسبه نشوند.
     # ⚠️ 4H باید حداقل ۲۵۰ کندل داشته باشد تا EMA200 حساب شود
     df_1h = fetch_ohlcv(SYMBOL, "1h", limit=600)
     df_4h = fetch_ohlcv(SYMBOL, "4h", limit=500)
 
-    # محاسبه ویژگی‌ها
+    # محاسبه ویژگی‌ها برای مدل
     X = build_feature_matrix(df_1h, df_4h)
 
     # پیش‌بینی
@@ -123,16 +135,28 @@ def generate_signal() -> dict:
     confidence  = prediction["confidence"]
     probabilities = prediction["probabilities"]
 
-    # قیمت فعلی و ATR
+    # قیمت فعلی
     price = float(df_1h["close"].iloc[-1])
-    atr   = float(df_1h["close"].diff().abs().rolling(14).mean().iloc[-1])
+
+    # ─── ATR واقعی (True Range با Wilder smoothing) ─────────
+    # قبلاً اینجا از میانگین قدرمطلق تغییر close محاسبه می‌شد که ATR
+    # واقعی نیست (High/Low و گپ قیمتی را نادیده می‌گرفت) و با atr_pct
+    # که مدل در آموزش دیده ناسازگار بود. حالا از همان تابع
+    # compute_indicators که در آموزش هم استفاده شده بهره می‌بریم تا
+    # محاسبه دقیق و سازگار باشد.
+    df_1h_ind = compute_indicators(df_1h)
+    atr = float(df_1h_ind["atr"].iloc[-1])
+    if not np.isfinite(atr) or atr <= 0:
+        logger.warning("ATR نامعتبر بود (داده ناکافی) — از fallback ۱٪ قیمت استفاده می‌شود.")
+        atr = price * 0.01
 
     # SL / TP
     sl, tp1, tp2 = _calculate_sl_tp(price, atr, signal_type)
 
     # بررسی Risk/Reward
     if signal_type != "WAIT" and not _risk_reward_ok(price, sl, tp1):
-        reason = f"ریسک به ریوارد کافی نیست (min 1.8). ML پیش‌بینی {prediction['raw_prediction']} داد."
+        reason = (f"ریسک به ریوارد کافی نیست (min {MIN_RISK_REWARD}). "
+                  f"ML پیش‌بینی {prediction['raw_prediction']} داد.")
         signal_type = "WAIT"
         sl = tp1 = tp2 = None
     else:
