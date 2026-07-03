@@ -6,6 +6,7 @@ import requests
 import pandas as pd
 import numpy as np
 import logging
+from datetime import datetime, timezone
 from config import BINANCE_BASE, SYMBOL, CANDLE_LIMIT, TRAIN_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,17 @@ logger = logging.getLogger(__name__)
 
 def fetch_ohlcv(symbol: str = SYMBOL,
                 interval: str = "1h",
-                limit: int = CANDLE_LIMIT) -> pd.DataFrame:
+                limit: int = CANDLE_LIMIT,
+                drop_unclosed: bool = True) -> pd.DataFrame:
     """
     دریافت کندل‌ها از Binance و تبدیل به DataFrame
-    
+
+    ⚠️ نکته مهم: آخرین کندلی که Binance برمی‌گرداند معمولاً کندل
+    «درحال‌شکل‌گیری» (هنوز بسته نشده) است. استفاده از این کندل برای
+    محاسبه اندیکاتورها و قیمت باعث می‌شود مقادیر هر ثانیه عوض شوند و
+    سیگنال‌ها ناپایدار/غیرقابل‌اعتماد به نظر برسند («دیتای ناقص»).
+    با drop_unclosed=True این کندل باز، قبل از بازگشت حذف می‌شود.
+
     Returns:
         DataFrame با ستون‌های: open, high, low, close, volume, timestamp
     """
@@ -26,7 +34,7 @@ def fetch_ohlcv(symbol: str = SYMBOL,
         "interval": interval,
         "limit": limit
     }
-    
+
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
@@ -34,22 +42,38 @@ def fetch_ohlcv(symbol: str = SYMBOL,
     except Exception as e:
         logger.error(f"Binance fetch error: {e}")
         raise RuntimeError(f"خطا در دریافت داده از Binance: {e}")
-    
+
+    if not raw:
+        raise RuntimeError(f"Binance داده‌ای برای {symbol}/{interval} برنگرداند.")
+
     df = pd.DataFrame(raw, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
         "close_time", "quote_vol", "trades", "taker_buy_base",
         "taker_buy_quote", "ignore"
     ])
-    
+
     # تبدیل نوع داده
     numeric_cols = ["open", "high", "low", "close", "volume"]
     df[numeric_cols] = df[numeric_cols].astype(float)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    df["timestamp"]  = pd.to_datetime(df["timestamp"], unit="ms")
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
+    df = df[["timestamp", "open", "high", "low", "close", "volume", "close_time"]].copy()
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
-    
-    logger.info(f"دریافت {len(df)} کندل {interval} برای {symbol}")
+
+    # ─── حذف کندل بازِ (بسته‌نشده) انتهایی ──────────────────
+    if drop_unclosed and len(df) > 0:
+        now_utc = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        if df["close_time"].iloc[-1] > now_utc:
+            df = df.iloc[:-1]
+            logger.info(f"کندل بازِ {interval} حذف شد (هنوز بسته نشده بود).")
+
+    df = df.drop(columns=["close_time"])
+
+    if df.empty:
+        raise RuntimeError(f"پس از حذف کندل باز، داده‌ای برای {symbol}/{interval} باقی نماند.")
+
+    logger.info(f"دریافت {len(df)} کندل بسته‌شدهٔ {interval} برای {symbol}")
     return df
 
 
