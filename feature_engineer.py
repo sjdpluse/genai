@@ -13,9 +13,14 @@ logger = logging.getLogger(__name__)
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     محاسبه تمام اندیکاتورها روی DataFrame کندل‌ها
-    
+
     Input:  DataFrame با ستون‌های open, high, low, close, volume
     Output: همان DataFrame به علاوه ستون‌های اندیکاتور
+
+    ⚠️ این تابع کاملاً causal است: هر مقدار در ردیف t فقط از داده‌های
+    ردیف‌های <= t استفاده می‌کند (rolling/ewm در pandas و `ta` به‌صورت
+    پیش‌فرض trailing هستند، نه centered) — پس lookahead bias در سطح
+    تک‌تایم‌فریم وجود ندارد.
     """
     df = df.copy()
     c = df["close"]
@@ -41,7 +46,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["adx_pos"]  = adx_obj.adx_pos()
     df["adx_neg"]  = adx_obj.adx_neg()
 
-    # Ichimoku
+    # Ichimoku — به‌جای این‌که فقط محاسبه و دور ریخته شود، به یک ویژگی
+    # نرمال (موقعیت قیمت نسبت به ابر ایچیموکو) تبدیل می‌شود؛ پایین‌تر
+    # در price_vs_ichi_a / ichi_cloud_diff استفاده می‌شود.
     ichi = ta.trend.IchimokuIndicator(h, l)
     df["ichi_a"] = ichi.ichimoku_a()
     df["ichi_b"] = ichi.ichimoku_b()
@@ -74,8 +81,20 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr_pct"] = df["atr"] / c            # ATR به‌صورت درصد قیمت
 
     # ─── حجم (Volume) ───────────────────────────────────────
-    df["obv"]  = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
-    df["vwap"] = ta.volume.VolumeWeightedAveragePriceIndicator(h, l, c, v).volume_weighted_average_price()
+    # ⚠️ OBV به‌صورت ذاتی یک مجموع تجمعی (cumulative sum) از ابتدای
+    # سری داده است. این یعنی مقدار خامش کاملاً به تعداد کندل‌های
+    # fetch‌شده وابسته است: در آموزش با ۵۰۰۰ کندل مقیاسش ~۸ برابر
+    # حالت inference (۶۰۰ کندل) است. اگر مقدار خام OBV مستقیماً به
+    # مدل داده شود، مدل روی مقیاسی آموزش می‌بیند که در inference هرگز
+    # تکرار نمی‌شود (train/serve skew) — این یک باگ واقعی صحت داده بود.
+    # راه‌حل: از z-score غلتان OBV استفاده می‌کنیم که ایستا (stationary)
+    # و مستقل از طول تاریخچهٔ دریافت‌شده است.
+    obv_raw = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
+    obv_mean = obv_raw.rolling(50).mean()
+    obv_std  = obv_raw.rolling(50).std()
+    df["obv_z"] = (obv_raw - obv_mean) / obv_std.replace(0, np.nan)
+
+    df["vwap"] = ta.volume.VolumeWeightedAveragePrice(h, l, c, v).volume_weighted_average_price()
 
     # نسبت حجم نسبت به میانگین ۲۰ کندل
     df["vol_ratio"] = v / v.rolling(20).mean()
@@ -101,6 +120,11 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["dist_to_high20"] = (h.rolling(20).max() - c) / c
     df["dist_to_low20"]  = (c - l.rolling(20).min()) / c
 
+    # موقعیت قیمت نسبت به ابر ایچیموکو (فیلتر روند) + قیمت نسبت به VWAP
+    df["price_vs_ichi_a"] = (c - df["ichi_a"]) / c
+    df["ichi_cloud_diff"] = (df["ichi_a"] - df["ichi_b"]) / c   # + یعنی ابر صعودی
+    df["price_vs_vwap"]   = (c - df["vwap"]) / df["vwap"]
+
     return df
 
 
@@ -110,46 +134,69 @@ def build_feature_matrix(df_1h: pd.DataFrame,
     ساخت ماتریس ویژگی نهایی با ادغام چند تایم‌فریم
 
     Args:
-        df_1h: داده ۱ ساعته با اندیکاتورها
-        df_4h: داده ۴ ساعته با اندیکاتورها (اختیاری — context روند بزرگ‌تر)
+        df_1h: داده ۱ ساعته (خام یا از قبل با compute_indicators پردازش‌شده)
+        df_4h: داده ۴ ساعته (خام یا از قبل پردازش‌شده) — اختیاری
 
     Returns:
         DataFrame آماده برای ورود به مدل ML
     """
-    df_1h = compute_indicators(df_1h)
+    # اگر ورودی از قبل توسط compute_indicators پردازش شده (ستون rsi موجود
+    # است)، دوباره محاسبه نمی‌کنیم — از محاسبات تکراری/هدررفت CPU
+    # جلوگیری می‌کند (این تابع هم از مسیر آموزش و هم مسیر inference
+    # صدا زده می‌شود؛ حالا هر دو می‌توانند یک df از قبل محاسبه‌شده را
+    # به اشتراک بگذارند).
+    if "rsi" not in df_1h.columns:
+        df_1h = compute_indicators(df_1h)
+    else:
+        df_1h = df_1h.copy()
 
-    # اگر ۴H داریم، اندیکاتورهای کلیدی آن را اضافه می‌کنیم
-    if df_4h is not None:
-        df_4h = compute_indicators(df_4h)
-
-        # ریسمپل ۴H به ۱H (forward-fill) تا بتوانیم merge کنیم
-        cols_4h = ["rsi", "adx", "macd_hist", "ema20_vs_ema50",
-                   "bb_pct", "atr_pct", "price_vs_ema200"]
-        df_4h_resampled = df_4h[cols_4h].reindex(df_1h.index, method="ffill")
-        df_4h_resampled.columns = [f"4h_{c}" for c in cols_4h]
-
-        df_1h = pd.concat([df_1h, df_4h_resampled], axis=1)
-
-    # ستون‌های ویژگی نهایی
+    # ستون‌های ویژگی نهایی (۱H)
     feature_cols = [
         # 1H indicators
         "rsi", "rsi_3", "stoch_k", "stoch_d", "cci", "mfi", "williams_r",
         "macd_hist", "adx", "adx_pos", "adx_neg",
         "bb_pct", "bb_width", "atr_pct",
-        "obv", "vol_ratio",
+        "obv_z", "vol_ratio",
         "price_vs_ema20", "price_vs_ema50", "price_vs_ema200",
         "ema20_vs_ema50", "ema20_slope", "ema50_slope",
         "candle_body", "candle_range", "upper_wick", "lower_wick",
         "dist_to_high20", "dist_to_low20",
         "roc_5", "roc_20",
+        "price_vs_ichi_a", "ichi_cloud_diff", "price_vs_vwap",
     ]
 
-    # اضافه کردن ویژگی‌های ۴H اگر وجود داشتند
+    # اگر ۴H داریم، اندیکاتورهای کلیدی آن را اضافه می‌کنیم
     if df_4h is not None:
+        if "rsi" not in df_4h.columns:
+            df_4h = compute_indicators(df_4h)
+        else:
+            df_4h = df_4h.copy()
+
+        # ─── رفع باگ Look-Ahead Bias در ادغام چند تایم‌فریم ─────
+        # اندیس هر ردیف df_4h زمان «بازشدن» کندل ۴H است، اما مقادیر آن
+        # ردیف (rsi، macd_hist و ...) بر اساس close همان کندل محاسبه
+        # شده‌اند که فقط در «زمان بسته‌شدن» (۴ ساعت بعد) مشخص می‌شود.
+        # قبلاً این ردیف مستقیماً روی ردیف‌های ۱H هم‌بازه (که هنوز به
+        # زمان بسته‌شدنش نرسیده بودند) forward-fill می‌شد → یعنی مدل در
+        # آموزش به دادهٔ آینده دسترسی داشت (classic multi-timeframe
+        # leakage). با shift(1) مقدار هر کندل ۴H را به زمان *بسته‌شدنش*
+        # منتقل می‌کنیم، بعد ffill می‌کنیم — یعنی هر ردیف ۱H فقط به
+        # آخرین کندل ۴H که واقعاً تا آن لحظه بسته شده دسترسی دارد.
+        cols_4h = ["rsi", "adx", "macd_hist", "ema20_vs_ema50",
+                   "bb_pct", "atr_pct", "price_vs_ema200", "obv_z"]
+        df_4h_shifted    = df_4h[cols_4h].shift(1)
+        df_4h_resampled  = df_4h_shifted.reindex(df_1h.index, method="ffill")
+        df_4h_resampled.columns = [f"4h_{c}" for c in cols_4h]
+
+        df_1h = pd.concat([df_1h, df_4h_resampled], axis=1)
         feature_cols += [c for c in df_1h.columns if c.startswith("4h_")]
 
-    available = [c for c in feature_cols if c in df_1h.columns]
-    return df_1h[available].copy()
+    # اطمینان از وجود تمام ستون‌ها — ستون‌های گمشده با NaN پر می‌شوند
+    for c in feature_cols:
+        if c not in df_1h.columns:
+            df_1h[c] = np.nan
+
+    return df_1h[feature_cols].copy()
 
 
 def create_labels(df_1h: pd.DataFrame,
@@ -162,13 +209,19 @@ def create_labels(df_1h: pd.DataFrame,
     اگر افت کرد → -1 (SHORT)
     وگرنه → 0 (WAIT)
 
-    ⚠️ این برچسب‌ها فقط برای آموزش مدل استفاده می‌شوند.
-       در پیش‌بینی واقعی، مدل روی آخرین کندل‌ها predict می‌کند.
+    ⚠️ رفع باگ: نسخهٔ قبلی برچسب را با pd.Series(0, ...) مقداردهی اولیه
+    می‌کرد و هرگز NaN تولید نمی‌کرد — یعنی N کندل آخر که آیندهٔ واقعی‌شان
+    اصلاً مشخص نیست (به‌خاطر shift(-forward_candles))، به‌اشتباه با
+    برچسب WAIT وارد آموزش می‌شدند (چون NaN >= threshold همیشه False
+    ارزیابی می‌شود). این باعث می‌شد مدل با برچسب‌های نادرست/جعلی برای
+    جدیدترین کندل‌های هر دورهٔ آموزش تغذیه شود. حالا این ردیف‌ها صراحتاً
+    NaN می‌شوند تا با y.dropna() به‌درستی از آموزش حذف شوند.
     """
     future_return = df_1h["close"].shift(-forward_candles) / df_1h["close"] - 1
 
-    labels = pd.Series(0, index=df_1h.index, name="label")
-    labels[future_return >= long_threshold]  = 1   # LONG
-    labels[future_return <= short_threshold] = -1  # SHORT
+    labels = pd.Series(0.0, index=df_1h.index, name="label")
+    labels[future_return >= long_threshold]  = 1.0   # LONG
+    labels[future_return <= short_threshold] = -1.0  # SHORT
+    labels[future_return.isna()] = np.nan             # آیندهٔ نامعلوم → حذف از آموزش
 
     return labels
