@@ -33,10 +33,7 @@ scheduler = BackgroundScheduler()
 def _model_ready_or_download() -> bool:
     """
     نقطهٔ واحد برای «آیا مدل آماده است؟» — یا محلی موجود است یا از
-    Supabase Storage دانلود می‌شود. قبلاً این منطق در /signal تکرار شده
-    بود و در hourly_job اصلاً چک نمی‌شد (اگر Railway ری‌استارت شود و
-    فایل‌سیستم ephemeral مدل را پاک کند، hourly_job سایلنت شکست
-    می‌خورد). حالا هر دو مسیر از همین یک تابع استفاده می‌کنند (DRY).
+    Supabase Storage دانلود می‌شود.
     """
     return ensure_model_available()
 
@@ -56,11 +53,9 @@ def hourly_job():
 
 def _do_training():
     """
-    ⚠️ رفع Race Condition: قبلاً چک `is_training` و ست‌کردن آن به True
-    دو عملیات جدا بودند (TOCTOU) — اگر دو درخواست هم‌زمان به /train و
-    /train-sync می‌آمدند، هر دو می‌توانستند از چک عبور کنند و هم‌زمان
-    run_training() را اجرا کنند (رقابت روی نوشتن فایل مدل + هدررفت CPU
-    مضاعف). حالا چک + ست شدن atomically زیر یک lock انجام می‌شود.
+    ⚠️ رفع Race Condition: چک `is_training` و ست‌کردن آن به True
+    atomically زیر یک lock انجام می‌شود تا دو درخواست هم‌زمان به
+    /train و /train-sync هرگز نتوانند هم‌زمان run_training() را اجرا کنند.
     """
     with _training_lock:
         if _training_state["is_training"]:
@@ -92,13 +87,8 @@ async def lifespan(app: FastAPI):
     model_ready = ensure_model_available()
 
     if not model_ready:
-        # ⚠️ رفع مشکل Deploy روی Railway: قبلاً اینجا _do_training() به‌صورت
-        # synchronous و بلاک‌کننده صدا زده می‌شد — یعنی سرور تا ۵-۱۰ دقیقه
-        # اصلاً به هیچ HTTP request (حتی /health) جواب نمی‌داد، چون
-        # lifespan startup قبل از yield کامل نمی‌شد. این می‌تواند باعث
-        # Timeout در health-check دیپلوی Railway و شکست کل دیپلوی شود.
-        # حالا آموزش اولیه در یک Thread پس‌زمینه اجرا می‌شود؛ سرور فوراً
-        # بالا می‌آید و کاربر می‌تواند وضعیت را از /train-status پیگیری کند.
+        # ⚠️ آموزش اولیه در یک Thread پس‌زمینه اجرا می‌شود تا سرور
+        # فوراً بالا بیاید و health-check دیپلوی Railway تایم‌اوت نشود.
         logger.info("مدلی پیدا نشد — آموزش اولیه در پس‌زمینه شروع شد...")
         threading.Thread(target=_do_training, daemon=True).start()
     else:
@@ -120,7 +110,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="ApexTrade ML Signal API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="ApexTrade ML Signal API", version="2.3.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -137,7 +127,7 @@ def verify_admin(x_admin_token: str = Header(default="")):
 
 @app.get("/")
 def root():
-    return {"name": "ApexTrade ML Signal API v2.2", "status": "running",
+    return {"name": "ApexTrade ML Signal API v2.3", "status": "running",
             "model": os.path.exists(MODEL_PATH), "time": datetime.now(timezone.utc).isoformat()}
 
 
@@ -174,9 +164,9 @@ def train_sync():
             "cv_accuracy": metrics.get("cv_accuracy"),
             "n_samples": metrics.get("n_samples"),
             "calibrated": metrics.get("calibrated"),
+            "embargo_candles": metrics.get("embargo_candles"),
         }
     except RuntimeError as e:
-        # چک atomic داخل _do_training رد شد (آموزش از قبل در حال اجراست)
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"خطا: {e}")
