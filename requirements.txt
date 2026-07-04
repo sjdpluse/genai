@@ -10,3 +10,4 @@ supabase==2.4.6
 apscheduler==3.10.4
 python-dotenv==1.0.1
 httpx==0.27.0
+urllib3==2.2.1
