@@ -18,12 +18,31 @@ from sklearn.metrics import classification_report, accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV
 
-from config import MODEL_PATH, SCALER_PATH
+from config import MODEL_PATH, SCALER_PATH, LABEL_FORWARD_CANDLES
 
 logger = logging.getLogger(__name__)
 
 # ─── نگاشت label عددی به نام ───────────────────────────────
 LABEL_MAP = {-1: "SHORT", 0: "WAIT", 1: "LONG"}
+
+# ─── Embargo برای جلوگیری از نشتی برچسب‌های آینده‌نگر ────────
+# هر برچسب در ردیف t با استفاده از قیمت t+LABEL_FORWARD_CANDLES ساخته
+# می‌شود (نگاه به آینده). این یعنی نزدیک‌ترین LABEL_FORWARD_CANDLES
+# ردیف به انتهای هر پنجرهٔ آموزشی، برچسبی دارند که از داخل بازهٔ تست
+# بعدی (که در TimeSeriesSplit بلافاصله بعد از آموزش می‌آید) گرفته شده
+# است — یعنی مدل هنگام اعتبارسنجی به‌طور غیرمستقیم اطلاعاتی از خودِ
+# دورهٔ تست را در برچسب‌های آموزشی دیده (leakage در مرز فولدها).
+# این باعث می‌شد CV Accuracy گزارش‌شده خوش‌بینانه‌تر از دقت واقعی مدل
+# در حالت زنده باشد. راه‌حل استاندارد: «Purged/Embargoed Cross-
+# Validation» — حذف آخرین EMBARGO ردیف از هر پنجرهٔ آموزشی قبل از fit.
+EMBARGO = LABEL_FORWARD_CANDLES
+
+
+def _purge_train_indices(train_idx: np.ndarray, embargo: int = EMBARGO) -> np.ndarray:
+    """حذف آخرین `embargo` نمونه از انتهای پنجرهٔ آموزشی (نزدیک‌ترین به تست)"""
+    if embargo <= 0 or len(train_idx) <= embargo:
+        return train_idx
+    return train_idx[:-embargo]
 
 
 def _build_pipeline() -> Pipeline:
@@ -47,8 +66,8 @@ def _build_pipeline() -> Pipeline:
 
 def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
     """
-    آموزش مدل با Time-Series Cross Validation
-    (از آینده برای گذشته استفاده نمی‌کنیم — lookahead bias نداریم)
+    آموزش مدل با Time-Series Cross Validation + Embargo
+    (از آینده برای گذشته استفاده نمی‌کنیم — نه در فیچرها، نه در مرز فولدها)
 
     Returns:
         (model, metrics_dict)  — model ممکن است Pipeline کالیبره‌شده باشد
@@ -73,12 +92,18 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
 
     pipeline = _build_pipeline()
 
-    # ─── Walk-Forward Validation ─────────────────────────────
-    # تقسیم‌بندی زمانی — مدل هرگز آینده را نمی‌بیند
+    # ─── Walk-Forward Validation با Embargo ──────────────────
+    # تقسیم‌بندی زمانی — مدل هرگز آینده را نمی‌بیند، و مرز بین آموزش/تست
+    # با EMBARGO ردیف خالی جدا می‌شود تا برچسب‌های آینده‌نگر نشت نکنند.
     tscv = TimeSeriesSplit(n_splits=5)
     fold_scores = []
 
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X_clean)):
+        train_idx = _purge_train_indices(train_idx)
+        if len(train_idx) == 0:
+            logger.warning(f"Fold {fold+1}: پس از embargo، دادهٔ آموزشی باقی نماند — رد شد.")
+            continue
+
         X_tr, X_te = X_clean.iloc[train_idx], X_clean.iloc[test_idx]
         y_tr, y_te = y_clean.iloc[train_idx], y_clean.iloc[test_idx]
 
@@ -86,10 +111,13 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
         preds = pipeline.predict(X_te)
         score = accuracy_score(y_te, preds)
         fold_scores.append(score)
-        logger.info(f"Fold {fold+1}: accuracy = {score:.3f}")
+        logger.info(f"Fold {fold+1}: accuracy = {score:.3f} (embargo={EMBARGO})")
+
+    if not fold_scores:
+        raise ValueError("هیچ fold معتبری برای اعتبارسنجی باقی نماند — داده یا embargo را بررسی کنید.")
 
     avg_score = np.mean(fold_scores)
-    logger.info(f"میانگین accuracy در cross-validation: {avg_score:.3f}")
+    logger.info(f"میانگین accuracy در cross-validation (با embargo): {avg_score:.3f}")
 
     # ─── آموزش نهایی روی تمام داده (برای feature importance و به‌عنوان fallback) ──
     pipeline.fit(X_clean, y_clean)
@@ -113,7 +141,8 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
     # واقعیِ کالیبره‌شده. برای این‌که عدد confidence که در سیگنال نهایی
     # نمایش داده می‌شود واقعاً قابل‌اتکا باشد (وقتی مدل ۷۰٪ می‌گوید،
     # واقعاً حدود ۷۰٪ از دفعات درست باشد)، یک کالیبراسیون Sigmoid
-    # (Platt Scaling) با اعتبارسنجی walk-forward روی آن اعمال می‌کنیم.
+    # (Platt Scaling) با اعتبارسنجی walk-forward (+ همان embargo بالا،
+    # چون همان مشکل نشتی مرزی اینجا هم صادق است) روی آن اعمال می‌کنیم.
     # اگر به هر دلیلی (مثلاً حجم دادهٔ ناکافی برای یکی از کلاس‌ها در
     # یکی از fold ها) کالیبراسیون شکست بخورد، بدون کرش، به مدل خام
     # (uncalibrated) برمی‌گردیم — سیستم هرگز نباید به‌خاطر این مرحله
@@ -121,16 +150,24 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
     final_model = pipeline
     calibrated = False
     try:
-        calib_cv = TimeSeriesSplit(n_splits=3)
+        calib_cv_raw = TimeSeriesSplit(n_splits=3)
+        calib_splits = [
+            (_purge_train_indices(tr), te)
+            for tr, te in calib_cv_raw.split(X_clean)
+            if len(_purge_train_indices(tr)) > 0
+        ]
+        if not calib_splits:
+            raise ValueError("هیچ split معتبری برای کالیبراسیون پس از embargo باقی نماند.")
+
         calibrated_pipeline = CalibratedClassifierCV(
             estimator=_build_pipeline(),
             method="sigmoid",
-            cv=calib_cv,
+            cv=calib_splits,
         )
         calibrated_pipeline.fit(X_clean, y_clean)
         final_model = calibrated_pipeline
         calibrated = True
-        logger.info("کالیبراسیون احتمالات (Platt Scaling) با موفقیت انجام شد.")
+        logger.info("کالیبراسیون احتمالات (Platt Scaling، با embargo) با موفقیت انجام شد.")
     except Exception as e:
         logger.warning(f"کالیبراسیون احتمالات ناموفق بود — از مدل خام استفاده می‌شود: {e}")
 
@@ -138,6 +175,7 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> tuple:
         "cv_accuracy": round(avg_score, 3),
         "fold_scores": [round(s, 3) for s in fold_scores],
         "n_samples": len(X_clean),
+        "embargo_candles": EMBARGO,
         "feature_importance": importance_df.head(10).to_dict("records"),
         "calibrated": calibrated,
     }
