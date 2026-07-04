@@ -61,3 +61,18 @@ MAX_PENDING_SIGNALS = 1
 # ─── مسیر ذخیره مدل ─────────────────────────────────────────
 MODEL_PATH  = "model/signal_model.joblib"
 SCALER_PATH = "model/scaler.joblib"
+
+# ─── قفل ایمنی پیکربندی (Config Sanity Guard) ────────────────
+# این باگ قبلاً یک‌بار واقعاً رخ داده بود: اگر MIN_RISK_REWARD به اشتباه
+# بالاتر از نسبت واقعی TP1/SL تنظیم شود، هیچ سیگنال LONG/SHORT ای هرگز
+# از فیلتر _risk_reward_ok عبور نمی‌کند و سیستم برای همیشه فقط WAIT
+# برمی‌گرداند — بدون هیچ خطای صریحی، فقط به‌صورت خاموش. به‌جای این‌که
+# منتظر بمانیم این باگ دوباره در آینده (مثلاً بعد از تغییر ضرایب ATR)
+# به‌صورت ساکت برگردد، همین‌جا در زمان import، صراحتاً fail می‌کنیم.
+_max_possible_rr = ATR_TP1_MULTIPLIER / ATR_SL_MULTIPLIER
+assert MIN_RISK_REWARD <= _max_possible_rr, (
+    f"پیکربندی نامعتبر: MIN_RISK_REWARD={MIN_RISK_REWARD} بزرگ‌تر از حداکثر "
+    f"نسبت ممکن ATR_TP1_MULTIPLIER/ATR_SL_MULTIPLIER={_max_possible_rr:.3f} است. "
+    f"با این تنظیمات هیچ سیگنال LONG/SHORT ای هرگز صادر نخواهد شد. "
+    f"یا MIN_RISK_REWARD را کاهش دهید یا ATR_TP1_MULTIPLIER را افزایش دهید."
+)
