@@ -54,7 +54,7 @@ def _do_training():
             raise RuntimeError("آموزش در حال اجراست")
         _training_state["is_training"] = True
         _training_state["last_error"] = None
-    
+
     try:
         logger.info("آموزش مدل شروع شد...")
         metrics = run_training()
@@ -78,7 +78,7 @@ def _do_training():
 async def lifespan(app: FastAPI):
     logger.info("راه‌اندازی ApexTrade Pro v3.0...")
     model_ready = ensure_model_available()
-    
+
     if not model_ready:
         logger.info("مدل پیدا نشد — آموزش اولیه...")
         threading.Thread(target=_do_training, daemon=True).start()
@@ -87,10 +87,10 @@ async def lifespan(app: FastAPI):
             hourly_job()
         except Exception as e:
             logger.warning(f"اولین سیگنال: {e}")
-    
+
     if not ADMIN_TOKEN:
         logger.warning("ADMIN_TOKEN تنظیم نشده")
-    
+
     scheduler.add_job(hourly_job, "interval", hours=1, id="hourly_signal")
     scheduler.start()
     logger.info("سرور آماده")
