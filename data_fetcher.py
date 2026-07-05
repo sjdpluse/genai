@@ -36,17 +36,17 @@ def fetch_ohlcv(symbol: str = SYMBOL, interval: str = "1h",
                 limit: int = CANDLE_LIMIT, drop_unclosed: bool = True) -> pd.DataFrame:
     url = f"{BINANCE_BASE}/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    
+
     raw = _get_json(url, params)
     if not raw:
         raise RuntimeError(f"Binance داده‌ای برنگرداند {symbol}/{interval}")
-    
+
     df = pd.DataFrame(raw, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
         "close_time", "quote_vol", "trades", "taker_buy_base",
         "taker_buy_quote", "ignore"
     ])
-    
+
     numeric_cols = ["open", "high", "low", "close", "volume"]
     df[numeric_cols] = df[numeric_cols].astype(float)
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
@@ -54,13 +54,13 @@ def fetch_ohlcv(symbol: str = SYMBOL, interval: str = "1h",
     df = df[["timestamp", "open", "high", "low", "close", "volume", "close_time"]].copy()
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
-    
+
     if drop_unclosed and len(df) > 0:
         now_utc = pd.Timestamp(datetime.now(timezone.utc))
         if df["close_time"].iloc[-1] > now_utc:
             df = df.iloc[:-1]
             logger.info(f"کندل باز {interval} حذف شد")
-    
+
     df = df.drop(columns=["close_time"])
     logger.info(f"دریافت {len(df)} کندل {interval} برای {symbol}")
     return df
@@ -70,21 +70,21 @@ def fetch_ohlcv_since(symbol: str = SYMBOL, interval: str = "5m",
                       start_time: datetime = None, limit: int = 1000) -> pd.DataFrame:
     if start_time is None:
         raise ValueError("start_time الزامی است")
-    
+
     if start_time.tzinfo is None:
         start_time = start_time.replace(tzinfo=timezone.utc)
-    
+
     url = f"{BINANCE_BASE}/klines"
     params = {
         "symbol": symbol, "interval": interval,
         "startTime": int(start_time.timestamp() * 1000),
         "limit": limit,
     }
-    
+
     raw = _get_json(url, params)
     if not raw:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    
+
     df = pd.DataFrame(raw, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
         "close_time", "quote_vol", "trades", "taker_buy_base",
@@ -119,12 +119,12 @@ def get_current_price(symbol: str = SYMBOL) -> float:
 def fetch_funding_rate(symbol: str = SYMBOL, limit: int = 500) -> pd.DataFrame:
     url = f"{BINANCE_FAPI}/fundingRate"
     params = {"symbol": symbol, "limit": limit}
-    
+
     try:
         raw = _get_json(url, params, timeout=10)
         if not raw:
             return pd.DataFrame(columns=["funding_rate"])
-        
+
         df = pd.DataFrame(raw)
         df["fundingTime"] = pd.to_datetime(df["fundingTime"], unit="ms", utc=True)
         df["funding_rate"] = df["fundingRate"].astype(float)
@@ -140,20 +140,20 @@ def fetch_funding_rate(symbol: str = SYMBOL, limit: int = 500) -> pd.DataFrame:
 def fetch_order_book(symbol: str = SYMBOL, limit: int = 100) -> dict:
     url = f"{BINANCE_BASE}/depth"
     params = {"symbol": symbol, "limit": limit}
-    
+
     try:
         data = _get_json(url, params, timeout=10)
         bids = pd.DataFrame(data["bids"], columns=["price", "qty"], dtype=float)
         asks = pd.DataFrame(data["asks"], columns=["price", "qty"], dtype=float)
-        
+
         best_bid = bids["price"].iloc[0]
         best_ask = asks["price"].iloc[0]
         spread = (best_ask - best_bid) / best_bid
-        
+
         bid_depth = bids["qty"].sum()
         ask_depth = asks["qty"].sum()
         depth_imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
-        
+
         return {
             "spread": spread,
             "depth_imbalance": depth_imbalance,
@@ -167,7 +167,7 @@ def fetch_order_book(symbol: str = SYMBOL, limit: int = 100) -> dict:
 
 def fetch_macro_data() -> dict:
     macro = {}
-    
+
     try:
         url = f"{YAHOO_BASE}/DX-Y.NYB"
         params = {"interval": "1d", "range": "1mo"}
@@ -179,7 +179,7 @@ def fetch_macro_data() -> dict:
     except Exception as e:
         logger.warning(f"DXY error: {e}")
         macro["dxy_change"] = 0
-    
+
     try:
         url = f"{YAHOO_BASE}/^VIX"
         params = {"interval": "1d", "range": "1mo"}
@@ -189,7 +189,7 @@ def fetch_macro_data() -> dict:
     except Exception as e:
         logger.warning(f"VIX error: {e}")
         macro["vix_level"] = 20
-    
+
     try:
         url = f"{YAHOO_BASE}/BTC.D"
         params = {"interval": "1d", "range": "1mo"}
@@ -199,5 +199,5 @@ def fetch_macro_data() -> dict:
     except Exception as e:
         logger.warning(f"BTC dom error: {e}")
         macro["btc_dominance"] = 50
-    
+
     return macro
