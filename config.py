@@ -33,7 +33,7 @@ LABEL_SHORT_THRESHOLD = -0.018
 LABEL_TIME_BARRIER = 24
 LABEL_VOL_BARRIER_MULT = 2.0
 
-# حداقل confidence — بالا برای وین‌ریت بیشتر
+# حداقل confidence
 MIN_CONFIDENCE = 65
 
 # ─── Risk Management ──────────────────────────────────────
