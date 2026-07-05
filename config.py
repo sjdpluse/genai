@@ -21,7 +21,7 @@ YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 # ─── تنظیمات سیگنال ───────────────────────────────────────
-SYMBOL = "ETHUSDT"
+SYMBOL = "BTCUSDT"
 INTERVALS = ["1h", "4h", "1d"]
 CANDLE_LIMIT = 1000
 TRAIN_LIMIT = 8000
