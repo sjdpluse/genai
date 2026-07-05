@@ -84,8 +84,7 @@ def _check_session_filter() -> bool:
 
 
 def _check_funding_filter(funding_rate: float, signal_type: str) -> bool:
-    # CoinGecko funding rate ندارد — همیشه True
-    return True
+    return True  # CoinGecko ندارد
 
 
 def _count_confluence(df_ind: pd.DataFrame, signal_type: str) -> int:
@@ -138,20 +137,51 @@ def _count_confluence(df_ind: pd.DataFrame, signal_type: str) -> int:
 
 
 def run_training(limit: int = 365) -> dict:
+    logger.info("=" * 50)
     logger.info("شروع آموزش ApexTrade Pro (CoinGecko)...")
+    logger.info("=" * 50)
 
-    data = fetch_multi_timeframe(limit_1h=limit, limit_4h=limit, limit_1d=limit)
-    df_1h_ind = compute_indicators(data["1h"])
+    try:
+        data = fetch_multi_timeframe(limit_1h=limit, limit_4h=limit, limit_1d=limit)
+        logger.info(f"Data fetched: 1h={len(data['1h'])} rows, 4h={len(data['4h'])} rows, 1d={len(data['1d'])} rows")
+    except Exception as e:
+        logger.error(f"خطا در دریافت داده: {e}")
+        raise
+
+    try:
+        df_1h_ind = compute_indicators(data["1h"])
+        logger.info(f"Indicators computed: {len(df_1h_ind)} rows")
+    except Exception as e:
+        logger.error(f"خطا در محاسبه اندیکاتورها: {e}")
+        raise
+
     funding_df = fetch_funding_rate(SYMBOL, limit=100)
 
-    X = build_feature_matrix(df_1h_ind, data["4h"], data["1d"], funding_df)
-    y = create_labels(df_1h_ind, forward_candles=LABEL_FORWARD_CANDLES,
-                      long_threshold=LABEL_LONG_THRESHOLD,
-                      short_threshold=LABEL_SHORT_THRESHOLD)
+    try:
+        X = build_feature_matrix(df_1h_ind, data["4h"], data["1d"], funding_df)
+        logger.info(f"Feature matrix: {X.shape}")
+    except Exception as e:
+        logger.error(f"خطا در ساخت feature matrix: {e}")
+        raise
+
+    try:
+        y = create_labels(df_1h_ind, forward_candles=LABEL_FORWARD_CANDLES,
+                          long_threshold=LABEL_LONG_THRESHOLD,
+                          short_threshold=LABEL_SHORT_THRESHOLD)
+        logger.info(f"Labels created: {len(y)} rows")
+    except Exception as e:
+        logger.error(f"خطا در ساخت برچسب‌ها: {e}")
+        raise
 
     feature_cols = list(X.columns)
-    pipeline, metrics = train_model(X, y)
-    save_model(pipeline, feature_cols)
+    logger.info(f"Feature columns: {len(feature_cols)}")
+
+    try:
+        pipeline, metrics = train_model(X, y)
+        save_model(pipeline, feature_cols)
+    except Exception as e:
+        logger.error(f"خطا در آموزش مدل: {e}")
+        raise
 
     logger.info(f"آموزش تمام. CV Acc: {metrics['cv_accuracy']} | F1: {metrics.get('cv_f1')}")
     return metrics
@@ -162,7 +192,6 @@ def generate_signal() -> dict:
 
     pipeline, feature_cols = load_model()
 
-    # CoinGecko فقط daily دارد — از daily استفاده می‌کنیم
     df_1h = fetch_ohlcv(SYMBOL, "1d", limit=365)
     df_4h = fetch_ohlcv(SYMBOL, "1d", limit=365)
     df_1d = fetch_ohlcv(SYMBOL, "1d", limit=365)
@@ -230,7 +259,7 @@ def generate_signal() -> dict:
             filters_failed.append("Session FAIL")
             signal_type = "WAIT"
 
-    # Layer 6: Funding (CoinGecko ندارد — همیشه OK)
+    # Layer 6: Funding (CoinGecko ندارد)
     if signal_type != "WAIT":
         filters_passed.append("Funding OK (N/A)")
 
