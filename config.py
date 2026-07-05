@@ -1,5 +1,5 @@
 """
-config.py — تنظیمات ApexTrade Pro v3.0
+config.py — تنظیمات ApexTrade Pro v3.0 (CoinGecko Edition)
 """
 import os
 from dotenv import load_dotenv
@@ -10,21 +10,14 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-# ─── Binance ──────────────────────────────────────────────
-BINANCE_BASE = "https://api.binance.com/api/v3"
-BINANCE_FAPI = "https://fapi.binance.com/fapi/v1"
-
-# ─── Yahoo Finance (Macro) ─────────────────────────────────
-YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
-
 # ─── امنیت ────────────────────────────────────────────────
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 # ─── تنظیمات سیگنال ───────────────────────────────────────
 SYMBOL = "ETHUSDT"
 INTERVALS = ["1h", "4h", "1d"]
-CANDLE_LIMIT = 1000
-TRAIN_LIMIT = 8000
+CANDLE_LIMIT = 365   # CoinGecko max 365 days
+TRAIN_LIMIT = 365    # CoinGecko max 365 days
 
 # Triple Barrier Labeling
 LABEL_FORWARD_CANDLES = 12
