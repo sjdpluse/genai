@@ -1,6 +1,5 @@
 """
-feature_engineer.py — محاسبه اندیکاتورهای تکنیکال و ساخت Feature Matrix
-از کتابخانه `ta` استفاده می‌کند — دقیق‌تر از محاسبات JS دستی
+feature_engineer.py — 80+ Advanced Features
 """
 import pandas as pd
 import numpy as np
@@ -11,217 +10,263 @@ logger = logging.getLogger(__name__)
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    محاسبه تمام اندیکاتورها روی DataFrame کندل‌ها
-
-    Input:  DataFrame با ستون‌های open, high, low, close, volume
-    Output: همان DataFrame به علاوه ستون‌های اندیکاتور
-
-    ⚠️ این تابع کاملاً causal است: هر مقدار در ردیف t فقط از داده‌های
-    ردیف‌های <= t استفاده می‌کند (rolling/ewm در pandas و `ta` به‌صورت
-    پیش‌فرض trailing هستند، نه centered) — پس lookahead bias در سطح
-    تک‌تایم‌فریم وجود ندارد.
-    """
     df = df.copy()
-    c = df["close"]
-    h = df["high"]
-    l = df["low"]
-    v = df["volume"]
-
-    # ─── روند (Trend) ────────────────────────────────────────
-    df["ema_20"]  = ta.trend.EMAIndicator(c, 20).ema_indicator()
-    df["ema_50"]  = ta.trend.EMAIndicator(c, 50).ema_indicator()
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    
+    # ─── Trend ─────────────────────────────────────────────
+    df["ema_20"] = ta.trend.EMAIndicator(c, 20).ema_indicator()
+    df["ema_50"] = ta.trend.EMAIndicator(c, 50).ema_indicator()
     df["ema_200"] = ta.trend.EMAIndicator(c, 200).ema_indicator()
-    df["sma_20"]  = ta.trend.SMAIndicator(c, 20).sma_indicator()
-
-    # MACD
-    macd_obj = ta.trend.MACD(c, window_slow=26, window_fast=12, window_sign=9)
-    df["macd"]        = macd_obj.macd()
-    df["macd_signal"] = macd_obj.macd_signal()
-    df["macd_hist"]   = macd_obj.macd_diff()
-
-    # ADX
-    adx_obj = ta.trend.ADXIndicator(h, l, c, 14)
-    df["adx"]      = adx_obj.adx()
-    df["adx_pos"]  = adx_obj.adx_pos()
-    df["adx_neg"]  = adx_obj.adx_neg()
-
-    # Ichimoku — به‌جای این‌که فقط محاسبه و دور ریخته شود، به یک ویژگی
-    # نرمال (موقعیت قیمت نسبت به ابر ایچیموکو) تبدیل می‌شود؛ پایین‌تر
-    # در price_vs_ichi_a / ichi_cloud_diff استفاده می‌شود.
+    df["sma_20"] = ta.trend.SMAIndicator(c, 20).sma_indicator()
+    df["sma_50"] = ta.trend.SMAIndicator(c, 50).sma_indicator()
+    
+    macd = ta.trend.MACD(c, 26, 12, 9)
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_hist"] = macd.macd_diff()
+    
+    adx = ta.trend.ADXIndicator(h, l, c, 14)
+    df["adx"] = adx.adx()
+    df["adx_pos"] = adx.adx_pos()
+    df["adx_neg"] = adx.adx_neg()
+    
     ichi = ta.trend.IchimokuIndicator(h, l)
     df["ichi_a"] = ichi.ichimoku_a()
     df["ichi_b"] = ichi.ichimoku_b()
-
-    # ─── نوسان (Momentum) ───────────────────────────────────
-    df["rsi"]     = ta.momentum.RSIIndicator(c, 14).rsi()
-    df["rsi_3"]   = ta.momentum.RSIIndicator(c, 3).rsi()   # RSI کوتاه برای سیگنال‌های سریع
-
+    df["ichi_base"] = ichi.ichimoku_base_line()
+    df["ichi_conv"] = ichi.ichimoku_conversion_line()
+    
+    # ─── Momentum ────────────────────────────────────────────
+    df["rsi"] = ta.momentum.RSIIndicator(c, 14).rsi()
+    df["rsi_3"] = ta.momentum.RSIIndicator(c, 3).rsi()
+    df["rsi_21"] = ta.momentum.RSIIndicator(c, 21).rsi()
+    
     stoch = ta.momentum.StochasticOscillator(h, l, c, 14, 3)
     df["stoch_k"] = stoch.stoch()
     df["stoch_d"] = stoch.stoch_signal()
-
+    
     df["cci"] = ta.trend.CCIIndicator(h, l, c, 20).cci()
     df["mfi"] = ta.volume.MFIIndicator(h, l, c, v, 14).money_flow_index()
     df["williams_r"] = ta.momentum.WilliamsRIndicator(h, l, c, 14).williams_r()
-
-    # ROC — نرخ تغییر قیمت
-    df["roc_5"]  = ta.momentum.ROCIndicator(c, 5).roc()
+    
+    df["roc_5"] = ta.momentum.ROCIndicator(c, 5).roc()
+    df["roc_10"] = ta.momentum.ROCIndicator(c, 10).roc()
     df["roc_20"] = ta.momentum.ROCIndicator(c, 20).roc()
-
-    # ─── نوسان‌پذیری (Volatility) ────────────────────────────
+    
+    # ─── Volatility ──────────────────────────────────────────
     bb = ta.volatility.BollingerBands(c, 20, 2)
-    df["bb_upper"]  = bb.bollinger_hband()
-    df["bb_lower"]  = bb.bollinger_lband()
-    df["bb_mid"]    = bb.bollinger_mavg()
-    df["bb_width"]  = bb.bollinger_wband()   # پهنای باند — نشانه volatility
-    df["bb_pct"]    = bb.bollinger_pband()   # موقعیت قیمت در باند (۰=کف، ۱=سقف)
-
-    df["atr"]  = ta.volatility.AverageTrueRange(h, l, c, 14).average_true_range()
-    df["atr_pct"] = df["atr"] / c            # ATR به‌صورت درصد قیمت
-
-    # ─── حجم (Volume) ───────────────────────────────────────
-    # ⚠️ OBV به‌صورت ذاتی یک مجموع تجمعی (cumulative sum) از ابتدای
-    # سری داده است. این یعنی مقدار خامش کاملاً به تعداد کندل‌های
-    # fetch‌شده وابسته است: در آموزش با ۵۰۰۰ کندل مقیاسش ~۸ برابر
-    # حالت inference (۶۰۰ کندل) است. اگر مقدار خام OBV مستقیماً به
-    # مدل داده شود، مدل روی مقیاسی آموزش می‌بیند که در inference هرگز
-    # تکرار نمی‌شود (train/serve skew) — این یک باگ واقعی صحت داده بود.
-    # راه‌حل: از z-score غلتان OBV استفاده می‌کنیم که ایستا (stationary)
-    # و مستقل از طول تاریخچهٔ دریافت‌شده است.
-    obv_raw = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
-    obv_mean = obv_raw.rolling(50).mean()
-    obv_std  = obv_raw.rolling(50).std()
-    df["obv_z"] = (obv_raw - obv_mean) / obv_std.replace(0, np.nan)
-
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_mid"] = bb.bollinger_mavg()
+    df["bb_width"] = bb.bollinger_wband()
+    df["bb_pct"] = bb.bollinger_pband()
+    
+    df["atr"] = ta.volatility.AverageTrueRange(h, l, c, 14).average_true_range()
+    df["atr_pct"] = df["atr"] / c
+    
+    kc = ta.volatility.KeltnerChannel(h, l, c, 20, 2)
+    df["kc_upper"] = kc.keltner_channel_hband()
+    df["kc_lower"] = kc.keltner_channel_lband()
+    df["kc_pct"] = (c - df["kc_lower"]) / (df["kc_upper"] - df["kc_lower"])
+    
+    # ─── Volume ──────────────────────────────────────────────
+    obv = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
+    obv_mean = obv.rolling(50).mean()
+    obv_std = obv.rolling(50).std()
+    df["obv_z"] = (obv - obv_mean) / obv_std.replace(0, np.nan)
+    
     df["vwap"] = ta.volume.VolumeWeightedAveragePrice(h, l, c, v).volume_weighted_average_price()
-
-    # نسبت حجم نسبت به میانگین ۲۰ کندل
     df["vol_ratio"] = v / v.rolling(20).mean()
-
-    # ─── ویژگی‌های ترکیبی (engineered features) ─────────────
-    # فاصله قیمت از EMAها (به‌صورت درصد)
-    df["price_vs_ema20"]  = (c - df["ema_20"])  / df["ema_20"]
-    df["price_vs_ema50"]  = (c - df["ema_50"])  / df["ema_50"]
-    df["price_vs_ema200"] = (c - df["ema_200"]) / df["ema_200"]
-    df["ema20_vs_ema50"]  = (df["ema_20"] - df["ema_50"]) / df["ema_50"]
-
-    # شیب EMA (momentum روند)
-    df["ema20_slope"]  = df["ema_20"].diff(3)  / df["ema_20"].shift(3)
-    df["ema50_slope"]  = df["ema_50"].diff(5)  / df["ema_50"].shift(5)
-
-    # کندل‌شناسی ساده
-    df["candle_body"]  = (c - df["open"]).abs() / df["atr"]
+    df["vol_std"] = v.rolling(20).std() / v.rolling(20).mean()
+    
+    # ─── Candlestick Patterns ──────────────────────────────
+    df["candle_body"] = (c - df["open"]).abs() / df["atr"]
     df["candle_range"] = (h - l) / df["atr"]
-    df["upper_wick"]   = (h - pd.concat([c, df["open"]], axis=1).max(axis=1)) / df["atr"]
-    df["lower_wick"]   = (pd.concat([c, df["open"]], axis=1).min(axis=1) - l) / df["atr"]
-
-    # High/Low نسبی
+    df["upper_wick"] = (h - pd.concat([c, df["open"]], axis=1).max(axis=1)) / df["atr"]
+    df["lower_wick"] = (pd.concat([c, df["open"]], axis=1).min(axis=1) - l) / df["atr"]
+    
+    prev_open = df["open"].shift(1)
+    prev_close = c.shift(1)
+    bullish_engulfing = (c > df["open"]) & (prev_close < prev_open) & (df["open"] < prev_close) & (c > prev_open)
+    bearish_engulfing = (c < df["open"]) & (prev_close > prev_open) & (df["open"] > prev_close) & (c < prev_open)
+    df["bullish_engulfing"] = bullish_engulfing.astype(int)
+    df["bearish_engulfing"] = bearish_engulfing.astype(int)
+    df["doji"] = (df["candle_body"] < 0.1).astype(int)
+    
+    # ─── Price vs MAs ────────────────────────────────────────────
+    df["price_vs_ema20"] = (c - df["ema_20"]) / df["ema_20"]
+    df["price_vs_ema50"] = (c - df["ema_50"]) / df["ema_50"]
+    df["price_vs_ema200"] = (c - df["ema_200"]) / df["ema_200"]
+    df["ema20_vs_ema50"] = (df["ema_20"] - df["ema_50"]) / df["ema_50"]
+    df["ema50_vs_ema200"] = (df["ema_50"] - df["ema_200"]) / df["ema_200"]
+    
+    df["ema20_slope"] = df["ema_20"].diff(3) / df["ema_20"].shift(3)
+    df["ema50_slope"] = df["ema_50"].diff(5) / df["ema_50"].shift(5)
+    df["ema200_slope"] = df["ema_200"].diff(10) / df["ema_200"].shift(10)
+    
+    # ─── Support/Resistance & Structure ──────────────────────
     df["dist_to_high20"] = (h.rolling(20).max() - c) / c
-    df["dist_to_low20"]  = (c - l.rolling(20).min()) / c
-
-    # موقعیت قیمت نسبت به ابر ایچیموکو (فیلتر روند) + قیمت نسبت به VWAP
+    df["dist_to_low20"] = (c - l.rolling(20).min()) / c
+    df["dist_to_high50"] = (h.rolling(50).max() - c) / c
+    df["dist_to_low50"] = (c - l.rolling(50).min()) / c
+    
+    df["hh"] = (h > h.rolling(20).max().shift(1)).astype(int)
+    df["ll"] = (l < l.rolling(20).min().shift(1)).astype(int)
+    df["hl"] = (l > l.rolling(20).min().shift(1)).astype(int)
+    df["lh"] = (h < h.rolling(20).max().shift(1)).astype(int)
+    
+    # ─── Ichimoku & VWAP ───────────────────────────────────
     df["price_vs_ichi_a"] = (c - df["ichi_a"]) / c
-    df["ichi_cloud_diff"] = (df["ichi_a"] - df["ichi_b"]) / c   # + یعنی ابر صعودی
-    df["price_vs_vwap"]   = (c - df["vwap"]) / df["vwap"]
-
+    df["price_vs_ichi_b"] = (c - df["ichi_b"]) / c
+    df["ichi_cloud_diff"] = (df["ichi_a"] - df["ichi_b"]) / c
+    df["price_vs_vwap"] = (c - df["vwap"]) / df["vwap"]
+    
+    # ─── Divergence Detection ────────────────────────────────
+    price_hh = c > c.rolling(10).max().shift(1)
+    rsi_lh = df["rsi"] < df["rsi"].rolling(10).max().shift(1)
+    df["rsi_bear_div"] = (price_hh & rsi_lh).astype(int)
+    
+    price_ll = c < c.rolling(10).min().shift(1)
+    rsi_hl = df["rsi"] > df["rsi"].rolling(10).min().shift(1)
+    df["rsi_bull_div"] = (price_ll & rsi_hl).astype(int)
+    
+    macd_hh = df["macd_hist"] > df["macd_hist"].rolling(10).max().shift(1)
+    macd_lh = df["macd_hist"] < df["macd_hist"].rolling(10).max().shift(1)
+    df["macd_bear_div"] = (price_hh & macd_lh).astype(int)
+    df["macd_bull_div"] = (price_ll & macd_hh).astype(int)
+    
+    # ─── Volatility Regime ───────────────────────────────────
+    df["vol_regime"] = df["atr_pct"].rolling(50).mean()
+    df["is_high_vol"] = (df["atr_pct"] > df["vol_regime"] * 1.5).astype(int)
+    
+    # ─── Time Features ───────────────────────────────────────
+    df["hour"] = df.index.hour
+    df["day_of_week"] = df.index.dayofweek
+    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+    
     return df
 
 
 def build_feature_matrix(df_1h: pd.DataFrame,
-                          df_4h: pd.DataFrame | None = None) -> pd.DataFrame:
-    """
-    ساخت ماتریس ویژگی نهایی با ادغام چند تایم‌فریم
-
-    Args:
-        df_1h: داده ۱ ساعته (خام یا از قبل با compute_indicators پردازش‌شده)
-        df_4h: داده ۴ ساعته (خام یا از قبل پردازش‌شده) — اختیاری
-
-    Returns:
-        DataFrame آماده برای ورود به مدل ML
-    """
-    # اگر ورودی از قبل توسط compute_indicators پردازش شده (ستون rsi موجود
-    # است)، دوباره محاسبه نمی‌کنیم — از محاسبات تکراری/هدررفت CPU
-    # جلوگیری می‌کند (این تابع هم از مسیر آموزش و هم مسیر inference
-    # صدا زده می‌شود؛ حالا هر دو می‌توانند یک df از قبل محاسبه‌شده را
-    # به اشتراک بگذارند).
+                         df_4h: pd.DataFrame | None = None,
+                         df_1d: pd.DataFrame | None = None,
+                         funding_df: pd.DataFrame | None = None,
+                         macro: dict | None = None) -> pd.DataFrame:
     if "rsi" not in df_1h.columns:
         df_1h = compute_indicators(df_1h)
     else:
         df_1h = df_1h.copy()
-
-    # ستون‌های ویژگی نهایی (۱H)
+    
     feature_cols = [
-        # 1H indicators
-        "rsi", "rsi_3", "stoch_k", "stoch_d", "cci", "mfi", "williams_r",
+        "rsi", "rsi_3", "rsi_21", "stoch_k", "stoch_d", "cci", "mfi", "williams_r",
         "macd_hist", "adx", "adx_pos", "adx_neg",
-        "bb_pct", "bb_width", "atr_pct",
-        "obv_z", "vol_ratio",
+        "bb_pct", "bb_width", "atr_pct", "kc_pct",
+        "obv_z", "vol_ratio", "vol_std",
         "price_vs_ema20", "price_vs_ema50", "price_vs_ema200",
-        "ema20_vs_ema50", "ema20_slope", "ema50_slope",
+        "ema20_vs_ema50", "ema50_vs_ema200", "ema20_slope", "ema50_slope", "ema200_slope",
         "candle_body", "candle_range", "upper_wick", "lower_wick",
-        "dist_to_high20", "dist_to_low20",
-        "roc_5", "roc_20",
-        "price_vs_ichi_a", "ichi_cloud_diff", "price_vs_vwap",
+        "dist_to_high20", "dist_to_low20", "dist_to_high50", "dist_to_low50",
+        "roc_5", "roc_10", "roc_20",
+        "price_vs_ichi_a", "price_vs_ichi_b", "ichi_cloud_diff", "price_vs_vwap",
+        "bullish_engulfing", "bearish_engulfing", "doji",
+        "hh", "ll", "hl", "lh",
+        "rsi_bear_div", "rsi_bull_div", "macd_bear_div", "macd_bull_div",
+        "is_high_vol", "hour", "day_of_week", "is_weekend",
     ]
-
-    # اگر ۴H داریم، اندیکاتورهای کلیدی آن را اضافه می‌کنیم
+    
+    # 4H with shift(1) — anti-lookahead
     if df_4h is not None:
         if "rsi" not in df_4h.columns:
             df_4h = compute_indicators(df_4h)
         else:
             df_4h = df_4h.copy()
-
-        # ─── رفع باگ Look-Ahead Bias در ادغام چند تایم‌فریم ─────
-        # اندیس هر ردیف df_4h زمان «بازشدن» کندل ۴H است، اما مقادیر آن
-        # ردیف (rsi، macd_hist و ...) بر اساس close همان کندل محاسبه
-        # شده‌اند که فقط در «زمان بسته‌شدن» (۴ ساعت بعد) مشخص می‌شود.
-        # قبلاً این ردیف مستقیماً روی ردیف‌های ۱H هم‌بازه (که هنوز به
-        # زمان بسته‌شدنش نرسیده بودند) forward-fill می‌شد → یعنی مدل در
-        # آموزش به دادهٔ آینده دسترسی داشت (classic multi-timeframe
-        # leakage). با shift(1) مقدار هر کندل ۴H را به زمان *بسته‌شدنش*
-        # منتقل می‌کنیم، بعد ffill می‌کنیم — یعنی هر ردیف ۱H فقط به
-        # آخرین کندل ۴H که واقعاً تا آن لحظه بسته شده دسترسی دارد.
-        cols_4h = ["rsi", "adx", "macd_hist", "ema20_vs_ema50",
-                   "bb_pct", "atr_pct", "price_vs_ema200", "obv_z"]
-        df_4h_shifted    = df_4h[cols_4h].shift(1)
-        df_4h_resampled  = df_4h_shifted.reindex(df_1h.index, method="ffill")
+        
+        cols_4h = ["rsi", "adx", "macd_hist", "ema20_vs_ema50", "bb_pct",
+                   "atr_pct", "price_vs_ema200", "obv_z", "vol_ratio",
+                   "price_vs_ema20", "price_vs_ema50", "ema20_slope"]
+        df_4h_shifted = df_4h[cols_4h].shift(1)
+        df_4h_resampled = df_4h_shifted.reindex(df_1h.index, method="ffill")
         df_4h_resampled.columns = [f"4h_{c}" for c in cols_4h]
-
         df_1h = pd.concat([df_1h, df_4h_resampled], axis=1)
         feature_cols += [c for c in df_1h.columns if c.startswith("4h_")]
-
-    # اطمینان از وجود تمام ستون‌ها — ستون‌های گمشده با NaN پر می‌شوند
+    
+    # 1D with shift(1)
+    if df_1d is not None:
+        if "rsi" not in df_1d.columns:
+            df_1d = compute_indicators(df_1d)
+        else:
+            df_1d = df_1d.copy()
+        
+        cols_1d = ["rsi", "adx", "macd_hist", "ema20_vs_ema50", "bb_pct",
+                   "atr_pct", "price_vs_ema200", "vol_ratio"]
+        df_1d_shifted = df_1d[cols_1d].shift(1)
+        df_1d_resampled = df_1d_shifted.reindex(df_1h.index, method="ffill")
+        df_1d_resampled.columns = [f"1d_{c}" for c in cols_1d]
+        df_1h = pd.concat([df_1h, df_1d_resampled], axis=1)
+        feature_cols += [c for c in df_1h.columns if c.startswith("1d_")]
+    
+    # Funding rate
+    if funding_df is not None and not funding_df.empty:
+        funding_resampled = funding_df.reindex(df_1h.index, method="ffill")
+        df_1h["funding_rate"] = funding_resampled["funding_rate"]
+        df_1h["funding_ema"] = df_1h["funding_rate"].ewm(span=8).mean()
+        feature_cols += ["funding_rate", "funding_ema"]
+    else:
+        df_1h["funding_rate"] = 0
+        df_1h["funding_ema"] = 0
+        feature_cols += ["funding_rate", "funding_ema"]
+    
+    # Macro
+    if macro:
+        df_1h["dxy_change"] = macro.get("dxy_change", 0)
+        df_1h["vix_level"] = macro.get("vix_level", 20)
+        df_1h["btc_dominance"] = macro.get("btc_dominance", 50)
+        feature_cols += ["dxy_change", "vix_level", "btc_dominance"]
+    else:
+        df_1h["dxy_change"] = 0
+        df_1h["vix_level"] = 20
+        df_1h["btc_dominance"] = 50
+        feature_cols += ["dxy_change", "vix_level", "btc_dominance"]
+    
     for c in feature_cols:
         if c not in df_1h.columns:
             df_1h[c] = np.nan
-
+    
     return df_1h[feature_cols].copy()
 
 
 def create_labels(df_1h: pd.DataFrame,
-                  forward_candles: int = 8,
-                  long_threshold: float = 0.015,
-                  short_threshold: float = -0.015) -> pd.Series:
+                  forward_candles: int = 12,
+                  long_threshold: float = 0.018,
+                  short_threshold: float = -0.018,
+                  time_barrier: int = 24,
+                  vol_barrier_mult: float = 2.0) -> pd.Series:
     """
-    برچسب‌گذاری: نگاه به آینده
-    اگر قیمت در N کندل آینده بیش از long_threshold رشد کرد → 1 (LONG)
-    اگر افت کرد → -1 (SHORT)
-    وگرنه → 0 (WAIT)
-
-    ⚠️ رفع باگ: نسخهٔ قبلی برچسب را با pd.Series(0, ...) مقداردهی اولیه
-    می‌کرد و هرگز NaN تولید نمی‌کرد — یعنی N کندل آخر که آیندهٔ واقعی‌شان
-    اصلاً مشخص نیست (به‌خاطر shift(-forward_candles))، به‌اشتباه با
-    برچسب WAIT وارد آموزش می‌شدند (چون NaN >= threshold همیشه False
-    ارزیابی می‌شود). این باعث می‌شد مدل با برچسب‌های نادرست/جعلی برای
-    جدیدترین کندل‌های هر دورهٔ آموزش تغذیه شود. حالا این ردیف‌ها صراحتاً
-    NaN می‌شوند تا با y.dropna() به‌درستی از آموزش حذف شوند.
+    Triple Barrier Method — برچسب‌گذاری واقعی‌تر
     """
-    future_return = df_1h["close"].shift(-forward_candles) / df_1h["close"] - 1
-
+    c = df_1h["close"]
+    atr = df_1h["atr"]
+    
+    future_prices = c.shift(-forward_candles)
+    future_return = future_prices / c - 1
+    
     labels = pd.Series(0.0, index=df_1h.index, name="label")
-    labels[future_return >= long_threshold]  = 1.0   # LONG
-    labels[future_return <= short_threshold] = -1.0  # SHORT
-    labels[future_return.isna()] = np.nan             # آیندهٔ نامعلوم → حذف از آموزش
-
+    labels[future_return >= long_threshold] = 1.0
+    labels[future_return <= short_threshold] = -1.0
+    
+    # بررسی Vol Barrier (SL) قبل از رسیدن به هدف
+    for i in range(len(df_1h) - time_barrier):
+        if pd.isna(labels.iloc[i]) or labels.iloc[i] == 0:
+            continue
+        window = c.iloc[i+1:i+time_barrier+1]
+        if labels.iloc[i] == 1.0:
+            sl = c.iloc[i] - atr.iloc[i] * vol_barrier_mult
+            if (window <= sl).any():
+                labels.iloc[i] = -1.0
+        elif labels.iloc[i] == -1.0:
+            sl = c.iloc[i] + atr.iloc[i] * vol_barrier_mult
+            if (window >= sl).any():
+                labels.iloc[i] = 1.0
+    
+    labels[future_return.isna()] = np.nan
     return labels
