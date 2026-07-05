@@ -1,5 +1,5 @@
 """
-win_tracker.py — 5m Candle Tracking
+win_tracker.py — Tracking with CoinGecko (daily granularity)
 """
 import logging
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ from supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
 
-TRACK_INTERVAL = "5m"
+TRACK_INTERVAL = "1d"  # CoinGecko فقط daily دارد
 EXPIRY_HOURS = 72
 
 
