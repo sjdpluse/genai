@@ -23,27 +23,24 @@ logger = logging.getLogger(__name__)
 _training_state = {
     "is_training": False,
     "last_trained": None,
-    "last_error":   None,
-    "cv_accuracy":  None,
+    "last_error": None,
+    "cv_accuracy": None,
+    "cv_f1": None,
 }
 _training_lock = threading.Lock()
 scheduler = BackgroundScheduler()
 
 
 def _model_ready_or_download() -> bool:
-    """
-    نقطهٔ واحد برای «آیا مدل آماده است؟» — یا محلی موجود است یا از
-    Supabase Storage دانلود می‌شود.
-    """
     return ensure_model_available()
 
 
 def hourly_job():
-    logger.info("=== کار ساعتی ===")
+    logger.info("=== کار ساعتی ApexTrade Pro ===")
     try:
         track_pending_signals()
         if not _model_ready_or_download():
-            logger.warning("مدل آماده نیست — کار ساعتی این دور را رد می‌کند.")
+            logger.warning("مدل آماده نیست")
             return
         signal = generate_signal()
         save_signal_to_db(signal)
@@ -52,17 +49,12 @@ def hourly_job():
 
 
 def _do_training():
-    """
-    ⚠️ رفع Race Condition: چک `is_training` و ست‌کردن آن به True
-    atomically زیر یک lock انجام می‌شود تا دو درخواست هم‌زمان به
-    /train و /train-sync هرگز نتوانند هم‌زمان run_training() را اجرا کنند.
-    """
     with _training_lock:
         if _training_state["is_training"]:
-            raise RuntimeError("آموزش از قبل در حال اجراست.")
+            raise RuntimeError("آموزش در حال اجراست")
         _training_state["is_training"] = True
-        _training_state["last_error"]   = None
-
+        _training_state["last_error"] = None
+    
     try:
         logger.info("آموزش مدل شروع شد...")
         metrics = run_training()
@@ -70,39 +62,35 @@ def _do_training():
         with _training_lock:
             _training_state["is_training"] = False
             _training_state["last_trained"] = datetime.now(timezone.utc).isoformat()
-            _training_state["cv_accuracy"]  = metrics.get("cv_accuracy")
-        logger.info(f"آموزش موفق — CV Accuracy: {metrics.get('cv_accuracy')}")
+            _training_state["cv_accuracy"] = metrics.get("cv_accuracy")
+            _training_state["cv_f1"] = metrics.get("cv_f1")
+        logger.info(f"آموزش موفق — Acc: {metrics.get('cv_accuracy')} | F1: {metrics.get('cv_f1')}")
         return metrics
     except Exception as e:
         with _training_lock:
             _training_state["is_training"] = False
-            _training_state["last_error"]  = str(e)
+            _training_state["last_error"] = str(e)
         logger.error(f"خطا در آموزش: {e}")
         raise
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("سرور در حال راه‌اندازی...")
+    logger.info("راه‌اندازی ApexTrade Pro v3.0...")
     model_ready = ensure_model_available()
-
+    
     if not model_ready:
-        # ⚠️ آموزش اولیه در یک Thread پس‌زمینه اجرا می‌شود تا سرور
-        # فوراً بالا بیاید و health-check دیپلوی Railway تایم‌اوت نشود.
-        logger.info("مدلی پیدا نشد — آموزش اولیه در پس‌زمینه شروع شد...")
+        logger.info("مدل پیدا نشد — آموزش اولیه...")
         threading.Thread(target=_do_training, daemon=True).start()
     else:
         try:
             hourly_job()
         except Exception as e:
             logger.warning(f"اولین سیگنال: {e}")
-
+    
     if not ADMIN_TOKEN:
-        logger.warning(
-            "⚠️ ADMIN_TOKEN تنظیم نشده — endpoint های /train و /train-sync "
-            "برای همه باز هستند. برای Production حتماً این متغیر محیطی را ست کنید."
-        )
-
+        logger.warning("ADMIN_TOKEN تنظیم نشده")
+    
     scheduler.add_job(hourly_job, "interval", hours=1, id="hourly_signal")
     scheduler.start()
     logger.info("سرور آماده")
@@ -110,33 +98,32 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="ApexTrade ML Signal API", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="ApexTrade Pro ML Signal API", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 def verify_admin(x_admin_token: str = Header(default="")):
-    """
-    محافظت از endpoint های سنگین/حساس (آموزش مدل). اگر ADMIN_TOKEN در
-    محیط ست نشده باشد، به‌صورت پیش‌فرض باز می‌ماند (سازگاری با نسخهٔ
-    قبلی) اما هشدار در لاگ startup داده می‌شود.
-    """
     if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(401, "دسترسی غیرمجاز — هدر X-Admin-Token معتبر لازم است.")
+        raise HTTPException(401, "دسترسی غیرمجاز")
     return True
 
 
 @app.get("/")
 def root():
-    return {"name": "ApexTrade ML Signal API v2.3", "status": "running",
-            "model": os.path.exists(MODEL_PATH), "time": datetime.now(timezone.utc).isoformat()}
+    return {
+        "name": "ApexTrade Pro ML Signal API v3.0",
+        "status": "running",
+        "model": os.path.exists(MODEL_PATH),
+        "time": datetime.now(timezone.utc).isoformat()
+    }
 
 
 @app.get("/signal")
 def get_signal():
     if not _model_ready_or_download():
         if _training_state["is_training"]:
-            raise HTTPException(503, "مدل در حال آموزش است — /train-status را چک کنید.")
-        raise HTTPException(503, "مدل آماده نیست. POST /train-sync را اجرا کنید.")
+            raise HTTPException(503, "مدل در حال آموزش است")
+        raise HTTPException(503, "مدل آماده نیست")
     try:
         signal = generate_signal()
         return {"success": True, "signal": signal}
@@ -148,23 +135,21 @@ def get_signal():
 @app.post("/train", dependencies=[Depends(verify_admin)])
 def train_background(background_tasks: BackgroundTasks):
     if _training_state["is_training"]:
-        return {"success": False, "message": "آموزش در حال اجرا است."}
+        return {"success": False, "message": "آموزش در حال اجراست"}
     background_tasks.add_task(_do_training)
-    return {"success": True, "message": "آموزش شروع شد — /train-status را چک کنید."}
+    return {"success": True, "message": "آموزش شروع شد"}
 
 
 @app.post("/train-sync", dependencies=[Depends(verify_admin)])
 def train_sync():
-    """آموزش همزمان — منتظر می‌ماند تا تمام شود (۵-۱۰ دقیقه)"""
     try:
         metrics = _do_training()
         return {
             "success": True,
-            "message": "آموزش تمام شد. /signal حالا کار می‌کند.",
             "cv_accuracy": metrics.get("cv_accuracy"),
+            "cv_f1": metrics.get("cv_f1"),
             "n_samples": metrics.get("n_samples"),
             "calibrated": metrics.get("calibrated"),
-            "embargo_candles": metrics.get("embargo_candles"),
         }
     except RuntimeError as e:
         raise HTTPException(400, str(e))
@@ -176,11 +161,12 @@ def train_sync():
 def train_status():
     state = _training_state.copy()
     return {
-        "is_training":  state["is_training"],
+        "is_training": state["is_training"],
         "model_exists": os.path.exists(MODEL_PATH),
         "last_trained": state["last_trained"],
-        "cv_accuracy":  state["cv_accuracy"],
-        "last_error":   state["last_error"],
+        "cv_accuracy": state["cv_accuracy"],
+        "cv_f1": state["cv_f1"],
+        "last_error": state["last_error"],
     }
 
 
@@ -216,9 +202,10 @@ def health():
     return {
         "status": "ok",
         "model_trained": os.path.exists(MODEL_PATH),
-        "is_training":   state["is_training"],
-        "last_trained":  state["last_trained"],
-        "cv_accuracy":   state["cv_accuracy"],
-        "scheduler":     scheduler.running,
-        "time":          datetime.now(timezone.utc).isoformat()
+        "is_training": state["is_training"],
+        "last_trained": state["last_trained"],
+        "cv_accuracy": state["cv_accuracy"],
+        "cv_f1": state["cv_f1"],
+        "scheduler": scheduler.running,
+        "time": datetime.now(timezone.utc).isoformat()
     }
