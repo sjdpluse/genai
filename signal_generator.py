@@ -1,5 +1,5 @@
 """
-signal_generator.py — 7-Layer Filter Signal Generation
+signal_generator.py — 7-Layer Filter Signal Generation (CoinGecko Edition)
 """
 import pandas as pd
 import numpy as np
@@ -84,10 +84,7 @@ def _check_session_filter() -> bool:
 
 
 def _check_funding_filter(funding_rate: float, signal_type: str) -> bool:
-    if signal_type == "LONG" and funding_rate > FUNDING_RATE_THRESHOLD:
-        return False
-    if signal_type == "SHORT" and funding_rate < -FUNDING_RATE_THRESHOLD:
-        return False
+    # CoinGecko funding rate ندارد — همیشه True
     return True
 
 
@@ -140,12 +137,12 @@ def _count_confluence(df_ind: pd.DataFrame, signal_type: str) -> int:
     return count
 
 
-def run_training(limit: int = 8000) -> dict:
-    logger.info("شروع آموزش ApexTrade Pro...")
+def run_training(limit: int = 365) -> dict:
+    logger.info("شروع آموزش ApexTrade Pro (CoinGecko)...")
 
-    data = fetch_multi_timeframe(limit_1h=limit, limit_4h=2000, limit_1d=500)
+    data = fetch_multi_timeframe(limit_1h=limit, limit_4h=limit, limit_1d=limit)
     df_1h_ind = compute_indicators(data["1h"])
-    funding_df = fetch_funding_rate(SYMBOL, limit=500)
+    funding_df = fetch_funding_rate(SYMBOL, limit=100)
 
     X = build_feature_matrix(df_1h_ind, data["4h"], data["1d"], funding_df)
     y = create_labels(df_1h_ind, forward_candles=LABEL_FORWARD_CANDLES,
@@ -161,13 +158,14 @@ def run_training(limit: int = 8000) -> dict:
 
 
 def generate_signal() -> dict:
-    logger.info("تولید سیگنال ApexTrade Pro...")
+    logger.info("تولید سیگنال ApexTrade Pro (CoinGecko)...")
 
     pipeline, feature_cols = load_model()
 
-    df_1h = fetch_ohlcv(SYMBOL, "1h", limit=800)
-    df_4h = fetch_ohlcv(SYMBOL, "4h", limit=600)
-    df_1d = fetch_ohlcv(SYMBOL, "1d", limit=300)
+    # CoinGecko فقط daily دارد — از daily استفاده می‌کنیم
+    df_1h = fetch_ohlcv(SYMBOL, "1d", limit=365)
+    df_4h = fetch_ohlcv(SYMBOL, "1d", limit=365)
+    df_1d = fetch_ohlcv(SYMBOL, "1d", limit=365)
     df_1h_ind = compute_indicators(df_1h)
 
     funding_df = fetch_funding_rate(SYMBOL, limit=100)
@@ -232,14 +230,9 @@ def generate_signal() -> dict:
             filters_failed.append("Session FAIL")
             signal_type = "WAIT"
 
-    # Layer 6: Funding
+    # Layer 6: Funding (CoinGecko ندارد — همیشه OK)
     if signal_type != "WAIT":
-        funding_rate = funding_df["funding_rate"].iloc[-1] if not funding_df.empty else 0
-        if _check_funding_filter(funding_rate, prediction["raw_prediction"]):
-            filters_passed.append("Funding OK")
-        else:
-            filters_failed.append("Funding FAIL")
-            signal_type = "WAIT"
+        filters_passed.append("Funding OK (N/A)")
 
     # Layer 7: Confluence
     if signal_type != "WAIT":
@@ -318,6 +311,8 @@ def _build_reason(prediction: dict, df_ind: pd.DataFrame,
     if not funding_df.empty:
         fr = funding_df["funding_rate"].iloc[-1]
         parts.append(f"Funding: {fr*100:.4f}%")
+    else:
+        parts.append("Funding: N/A (CoinGecko)")
 
     if filters_passed:
         parts.append(f"✓ {', '.join(filters_passed)}")
