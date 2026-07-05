@@ -1,7 +1,5 @@
 """
 model_store.py — ذخیره و بارگذاری مدل از Supabase Storage
-چرا؟ Railway فایل‌سیستم ephemeral دارد — هر restart مدل پاک می‌شود.
-راه‌حل: مدل را در Supabase Storage ذخیره می‌کنیم.
 """
 import io
 import os
@@ -9,12 +7,12 @@ import joblib
 import logging
 
 from supabase_client import get_supabase
-from config import MODEL_PATH
+from config import MODEL_PATH, SYMBOL
 
 logger = logging.getLogger(__name__)
 
-BUCKET  = "ml-models"          # نام bucket در Supabase Storage
-STORAGE_KEY = "signal_model.joblib"
+BUCKET  = "ml-models"
+STORAGE_KEY = f"signal_model_{SYMBOL}.joblib"
 
 
 def upload_model_to_supabase() -> bool:
@@ -27,7 +25,6 @@ def upload_model_to_supabase() -> bool:
         with open(MODEL_PATH, "rb") as f:
             data = f.read()
 
-        # اگر قبلاً وجود داشت، حذف و دوباره آپلود کن
         try:
             sb.storage.from_(BUCKET).remove([STORAGE_KEY])
         except Exception:
@@ -71,7 +68,7 @@ def ensure_model_available() -> bool:
     اطمینان از وجود مدل:
     ۱. اگر محلی دارد → خوب
     ۲. اگر ندارد → از Supabase دانلود کن
-    ۳. اگر آن هم نداشت → False برگردان (نیاز به train)
+    ۳. اگر آن هم نداشت → False (نیاز به train)
     """
     if os.path.exists(MODEL_PATH):
         logger.info("مدل محلی موجود است")
