@@ -36,7 +36,7 @@ def _model_ready_or_download() -> bool:
 
 
 def hourly_job():
-    logger.info("=== کار ساعتی ApexTrade Pro ===")
+    logger.info("=== کار ساعتی ApexTrade Pro (CoinGecko) ===")
     try:
         track_pending_signals()
         if not _model_ready_or_download():
@@ -76,7 +76,7 @@ def _do_training():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("راه‌اندازی ApexTrade Pro v3.0...")
+    logger.info("راه‌اندازی ApexTrade Pro v3.0 (CoinGecko)...")
     model_ready = ensure_model_available()
 
     if not model_ready:
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="ApexTrade Pro ML Signal API", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="ApexTrade Pro ML Signal API (CoinGecko)", version="3.0.0-cg", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -111,7 +111,7 @@ def verify_admin(x_admin_token: str = Header(default="")):
 @app.get("/")
 def root():
     return {
-        "name": "ApexTrade Pro ML Signal API v3.0",
+        "name": "ApexTrade Pro ML Signal API v3.0 (CoinGecko)",
         "status": "running",
         "model": os.path.exists(MODEL_PATH),
         "time": datetime.now(timezone.utc).isoformat()
