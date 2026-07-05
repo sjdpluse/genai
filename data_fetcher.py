@@ -1,6 +1,7 @@
 """
-data_fetcher.py — دریافت OHLCV از CoinGecko (بدون محدودیت IP)
+data_fetcher.py — دریافت OHLCV از Binance با Proxy
 """
+import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -8,11 +9,23 @@ import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime, timezone
-from config import SYMBOL, CANDLE_LIMIT, TRAIN_LIMIT
+from config import BINANCE_BASE, SYMBOL, CANDLE_LIMIT, TRAIN_LIMIT
 
 logger = logging.getLogger(__name__)
 
+# ─── Proxy Configuration ────────────────────────────────────
+PROXY_URL = os.getenv("PROXY_URL", "")
+
 _session = requests.Session()
+
+# اگر proxy ست شده باشد
+if PROXY_URL:
+    logger.info(f"Using proxy: {PROXY_URL[:20]}...")
+    _session.proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL,
+    }
+
 _retry_strategy = Retry(
     total=3, backoff_factor=0.5,
     status_forcelist=[429, 500, 502, 503, 504],
@@ -29,159 +42,152 @@ def _get_json(url: str, params: dict = None, timeout: int = 15):
     return resp.json()
 
 
-# ─── CoinGecko API ──────────────────────────────────────────
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
-
-COIN_ID_MAP = {
-    "ETHUSDT": "ethereum",
-    "BTCUSDT": "bitcoin",
-    "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin",
-    "ADAUSDT": "cardano",
-    "XRPUSDT": "ripple",
-    "DOTUSDT": "polkadot",
-    "AVAXUSDT": "avalanche-2",
-    "MATICUSDT": "matic-network",
-    "LINKUSDT": "chainlink",
-}
-
-
-def _get_coin_id(symbol: str) -> str:
-    return COIN_ID_MAP.get(symbol, symbol.lower().replace("usdt", ""))
-
-
 def fetch_ohlcv(symbol: str = SYMBOL, interval: str = "1h",
                 limit: int = CANDLE_LIMIT, drop_unclosed: bool = True) -> pd.DataFrame:
-    """دریافت کندل‌ها از CoinGecko"""
-    coin_id = _get_coin_id(symbol)
-
-    # CoinGecko فقط daily دارد
-    days = min(limit, 365)
-
-    url = f"{COINGECKO_BASE}/coins/{coin_id}/ohlc"
-    params = {"vs_currency": "usd", "days": str(days)}
+    """دریافت کندل‌ها از Binance"""
+    url = f"{BINANCE_BASE}/klines"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
 
     try:
-        raw = _get_json(url, params, timeout=30)
-        logger.info(f"CoinGecko OHLC raw data: {len(raw)} rows")
+        raw = _get_json(url, params)
     except Exception as e:
-        logger.error(f"CoinGecko fetch error: {e}")
-        raise RuntimeError(f"خطا در دریافت داده از CoinGecko: {e}")
+        logger.error(f"Binance fetch error: {e}")
+        raise RuntimeError(f"خطا در دریافت داده از Binance: {e}")
 
-    if not raw or len(raw) == 0:
-        raise RuntimeError(f"CoinGecko داده‌ای برای {coin_id} برنگرداند.")
+    if not raw:
+        raise RuntimeError(f"Binance داده‌ای برای {symbol}/{interval} برنگرداند.")
 
-    # CoinGecko OHLC: [timestamp, open, high, low, close]
-    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close"])
+    df = pd.DataFrame(raw, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_vol", "trades", "taker_buy_base",
+        "taker_buy_quote", "ignore"
+    ])
+
+    numeric_cols = ["open", "high", "low", "close", "volume"]
+    df[numeric_cols] = df[numeric_cols].astype(float)
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-
-    # حجم را از market_chart بگیریم
-    try:
-        vol_url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
-        vol_params = {"vs_currency": "usd", "days": str(days)}
-        vol_data = _get_json(vol_url, vol_params, timeout=30)
-        vol_df = pd.DataFrame(vol_data["total_volumes"], columns=["timestamp", "volume"])
-        vol_df["timestamp"] = pd.to_datetime(vol_df["timestamp"], unit="ms", utc=True)
-        vol_df["volume"] = vol_df["volume"].astype(float)
-        df = df.merge(vol_df, on="timestamp", how="left")
-        logger.info(f"Volume data merged: {len(df)} rows")
-    except Exception as e:
-        logger.warning(f"خطا در دریافت حجم: {e} — با ۱ پر می‌شود")
-        df["volume"] = 1.0  # حجم ثابت برای جلوگیری از division by zero
-
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    df = df[["timestamp", "open", "high", "low", "close", "volume", "close_time"]].copy()
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
 
-    # اگر حجم NaN است، با ۱ پر کن
-    df["volume"] = df["volume"].fillna(1.0)
+    # حذف کندل باز
+    if drop_unclosed and len(df) > 0:
+        now_utc = pd.Timestamp(datetime.now(timezone.utc))
+        if df["close_time"].iloc[-1] > now_utc:
+            df = df.iloc[:-1]
+            logger.info(f"کندل باز {interval} حذف شد")
 
-    logger.info(f"Final DataFrame: {len(df)} rows, columns: {list(df.columns)}")
-    logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
-
+    df = df.drop(columns=["close_time"])
+    logger.info(f"دریافت {len(df)} کندل {interval} برای {symbol}")
     return df
 
 
 def fetch_ohlcv_since(symbol: str = SYMBOL, interval: str = "5m",
                       start_time: datetime = None, limit: int = 1000) -> pd.DataFrame:
-    """دریافت کندل‌ها از زمان مشخص"""
     if start_time is None:
         raise ValueError("start_time الزامی است")
 
-    coin_id = _get_coin_id(symbol)
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
 
-    now = datetime.now(timezone.utc)
-    days_diff = (now - start_time).days + 1
-    days_diff = min(max(days_diff, 1), 90)
-
-    url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
-    params = {"vs_currency": "usd", "days": str(days_diff)}
+    url = f"{BINANCE_BASE}/klines"
+    params = {
+        "symbol": symbol, "interval": interval,
+        "startTime": int(start_time.timestamp() * 1000),
+        "limit": limit,
+    }
 
     try:
-        data = _get_json(url, params, timeout=30)
+        raw = _get_json(url, params)
     except Exception as e:
-        logger.error(f"CoinGecko since error: {e}")
+        logger.error(f"Binance fetch_ohlcv_since error: {e}")
+        raise RuntimeError(f"خطا در دریافت کندل‌های ردیابی: {e}")
+
+    if not raw:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
-    prices = pd.DataFrame(data["prices"], columns=["timestamp", "close"])
-    prices["timestamp"] = pd.to_datetime(prices["timestamp"], unit="ms", utc=True)
-
-    prices["open"] = prices["close"].shift(1)
-    prices["high"] = prices["close"] * 1.002
-    prices["low"] = prices["close"] * 0.998
-
-    if "total_volumes" in data:
-        vols = pd.DataFrame(data["total_volumes"], columns=["timestamp", "volume"])
-        vols["timestamp"] = pd.to_datetime(vols["timestamp"], unit="ms", utc=True)
-        prices = prices.merge(vols, on="timestamp", how="left")
-    else:
-        prices["volume"] = 1.0
-
-    prices.set_index("timestamp", inplace=True)
-    prices = prices[["open", "high", "low", "close", "volume"]].dropna()
-    prices.sort_index(inplace=True)
-    prices = prices[prices.index >= start_time]
-
-    return prices
+    df = pd.DataFrame(raw, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_vol", "trades", "taker_buy_base",
+        "taker_buy_quote", "ignore"
+    ])
+    numeric_cols = ["open", "high", "low", "close", "volume"]
+    df[numeric_cols] = df[numeric_cols].astype(float)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    df.set_index("timestamp", inplace=True)
+    df.sort_index(inplace=True)
+    return df
 
 
 def fetch_multi_timeframe(symbol: str = SYMBOL,
                           limit_1h: int = TRAIN_LIMIT,
                           limit_4h: int = 2000,
                           limit_1d: int = 500) -> dict:
-    """دریافت همزمان چند تایم‌فریم"""
-    df_daily = fetch_ohlcv(symbol, "1d", limit=min(limit_1d, 365))
-
     return {
-        "1h": df_daily,
-        "4h": df_daily,
-        "1d": df_daily,
+        "1h": fetch_ohlcv(symbol, "1h", limit_1h),
+        "4h": fetch_ohlcv(symbol, "4h", limit_4h),
+        "1d": fetch_ohlcv(symbol, "1d", limit_1d),
     }
 
 
 def get_current_price(symbol: str = SYMBOL) -> float:
-    """قیمت لحظه‌ای از CoinGecko"""
-    coin_id = _get_coin_id(symbol)
-    url = f"{COINGECKO_BASE}/simple/price"
-    params = {"ids": coin_id, "vs_currencies": "usd"}
-    data = _get_json(url, params)
-    return float(data[coin_id]["usd"])
+    url = f"{BINANCE_BASE}/ticker/price"
+    data = _get_json(url, {"symbol": symbol})
+    return float(data["price"])
 
 
 def fetch_funding_rate(symbol: str = SYMBOL, limit: int = 500) -> pd.DataFrame:
-    """CoinGecko funding rate ندارد"""
-    logger.debug("CoinGecko funding rate ندارد")
-    return pd.DataFrame(columns=["funding_rate"])
+    """CoinGecko funding rate ندارد — DataFrame خالی"""
+    logger.debug("Funding rate از Binance Futures")
+    url = f"https://fapi.binance.com/fapi/v1/fundingRate"
+    params = {"symbol": symbol, "limit": limit}
+    try:
+        raw = _get_json(url, params, timeout=10)
+        if not raw:
+            return pd.DataFrame(columns=["funding_rate"])
+        df = pd.DataFrame(raw)
+        df["fundingTime"] = pd.to_datetime(df["fundingTime"], unit="ms", utc=True)
+        df["funding_rate"] = df["fundingRate"].astype(float)
+        df = df[["fundingTime", "funding_rate"]].copy()
+        df.set_index("fundingTime", inplace=True)
+        df.sort_index(inplace=True)
+        return df
+    except Exception as e:
+        logger.warning(f"Funding rate error: {e}")
+        return pd.DataFrame(columns=["funding_rate"])
 
 
 def fetch_order_book(symbol: str = SYMBOL, limit: int = 100) -> dict:
-    """CoinGecko order book ندارد"""
-    logger.debug("CoinGecko order book ندارد")
-    return {"spread": 0, "depth_imbalance": 0, "best_bid": 0, "best_ask": 0}
+    url = f"{BINANCE_BASE}/depth"
+    params = {"symbol": symbol, "limit": limit}
+    try:
+        data = _get_json(url, params, timeout=10)
+        bids = pd.DataFrame(data["bids"], columns=["price", "qty"], dtype=float)
+        asks = pd.DataFrame(data["asks"], columns=["price", "qty"], dtype=float)
+        best_bid = bids["price"].iloc[0]
+        best_ask = asks["price"].iloc[0]
+        spread = (best_ask - best_bid) / best_bid
+        bid_depth = bids["qty"].sum()
+        ask_depth = asks["qty"].sum()
+        depth_imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+        return {
+            "spread": spread,
+            "depth_imbalance": depth_imbalance,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+        }
+    except Exception as e:
+        logger.warning(f"Order book error: {e}")
+        return {"spread": 0, "depth_imbalance": 0, "best_bid": 0, "best_ask": 0}
 
 
 def fetch_macro_data() -> dict:
-    """داده‌های کلان"""
     macro = {}
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB"
