@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """محاسبه اندیکاتورها با مدیریت داده کم"""
+    """محاسبه اندیکاتورها با مدیریت داده کم و inf"""
     df = df.copy()
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
 
@@ -21,12 +21,11 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_20"] = ta.trend.EMAIndicator(c, 20).ema_indicator()
     df["ema_50"] = ta.trend.EMAIndicator(c, 50).ema_indicator()
 
-    # EMA200 فقط اگر داده کافی داریم
     if n_rows >= 200:
         df["ema_200"] = ta.trend.EMAIndicator(c, 200).ema_indicator()
     else:
         logger.warning(f"داده کم ({n_rows} < 200) — EMA200 با SMA50 تقریب زده می‌شود")
-        df["ema_200"] = df["ema_50"]  # fallback
+        df["ema_200"] = df["ema_50"]
 
     df["sma_20"] = ta.trend.SMAIndicator(c, 20).sma_indicator()
     df["sma_50"] = ta.trend.SMAIndicator(c, 50).sma_indicator()
@@ -84,17 +83,27 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     obv = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
     obv_mean = obv.rolling(50).mean()
     obv_std = obv.rolling(50).std()
-    df["obv_z"] = (obv - obv_mean) / obv_std.replace(0, np.nan)
+    # جلوگیری از تقسیم بر صفر
+    obv_std_safe = obv_std.replace(0, np.nan)
+    df["obv_z"] = (obv - obv_mean) / obv_std_safe
 
     df["vwap"] = ta.volume.VolumeWeightedAveragePrice(h, l, c, v).volume_weighted_average_price()
-    df["vol_ratio"] = v / v.rolling(20).mean()
-    df["vol_std"] = v.rolling(20).std() / v.rolling(20).mean()
+
+    vol_mean = v.rolling(20).mean()
+    vol_mean_safe = vol_mean.replace(0, np.nan)
+    df["vol_ratio"] = v / vol_mean_safe
+
+    vol_std = v.rolling(20).std()
+    vol_std_safe = vol_std.replace(0, np.nan)
+    df["vol_std"] = vol_std_safe / vol_mean_safe
 
     # ─── Candlestick Patterns ──────────────────────────────
-    df["candle_body"] = (c - df["open"]).abs() / df["atr"]
-    df["candle_range"] = (h - l) / df["atr"]
-    df["upper_wick"] = (h - pd.concat([c, df["open"]], axis=1).max(axis=1)) / df["atr"]
-    df["lower_wick"] = (pd.concat([c, df["open"]], axis=1).min(axis=1) - l) / df["atr"]
+    # جلوگیری از تقسیم بر ATR=0
+    atr_safe = df["atr"].replace(0, np.nan)
+    df["candle_body"] = (c - df["open"]).abs() / atr_safe
+    df["candle_range"] = (h - l) / atr_safe
+    df["upper_wick"] = (h - pd.concat([c, df["open"]], axis=1).max(axis=1)) / atr_safe
+    df["lower_wick"] = (pd.concat([c, df["open"]], axis=1).min(axis=1) - l) / atr_safe
 
     prev_open = df["open"].shift(1)
     prev_close = c.shift(1)
@@ -105,11 +114,16 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["doji"] = (df["candle_body"] < 0.1).astype(int)
 
     # ─── Price vs MAs ────────────────────────────────────────────
-    df["price_vs_ema20"] = (c - df["ema_20"]) / df["ema_20"]
-    df["price_vs_ema50"] = (c - df["ema_50"]) / df["ema_50"]
-    df["price_vs_ema200"] = (c - df["ema_200"]) / df["ema_200"]
-    df["ema20_vs_ema50"] = (df["ema_20"] - df["ema_50"]) / df["ema_50"]
-    df["ema50_vs_ema200"] = (df["ema_50"] - df["ema_200"]) / df["ema_200"]
+    # جلوگیری از تقسیم بر EMA=0
+    ema20_safe = df["ema_20"].replace(0, np.nan)
+    ema50_safe = df["ema_50"].replace(0, np.nan)
+    ema200_safe = df["ema_200"].replace(0, np.nan)
+
+    df["price_vs_ema20"] = (c - df["ema_20"]) / ema20_safe
+    df["price_vs_ema50"] = (c - df["ema_50"]) / ema50_safe
+    df["price_vs_ema200"] = (c - df["ema_200"]) / ema200_safe
+    df["ema20_vs_ema50"] = (df["ema_20"] - df["ema_50"]) / ema50_safe
+    df["ema50_vs_ema200"] = (df["ema_50"] - df["ema_200"]) / ema200_safe
 
     df["ema20_slope"] = df["ema_20"].diff(3) / df["ema_20"].shift(3)
     df["ema50_slope"] = df["ema_50"].diff(5) / df["ema_50"].shift(5)
@@ -127,10 +141,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["lh"] = (h < h.rolling(20).max().shift(1)).astype(int)
 
     # ─── Ichimoku & VWAP ───────────────────────────────────
+    ichi_a_safe = df["ichi_a"].replace(0, np.nan)
+    ichi_b_safe = df["ichi_b"].replace(0, np.nan)
+    vwap_safe = df["vwap"].replace(0, np.nan)
+
     df["price_vs_ichi_a"] = (c - df["ichi_a"]) / c
     df["price_vs_ichi_b"] = (c - df["ichi_b"]) / c
     df["ichi_cloud_diff"] = (df["ichi_a"] - df["ichi_b"]) / c
-    df["price_vs_vwap"] = (c - df["vwap"]) / df["vwap"]
+    df["price_vs_vwap"] = (c - df["vwap"]) / vwap_safe
 
     # ─── Divergence Detection ────────────────────────────────
     price_hh = c > c.rolling(10).max().shift(1)
@@ -155,11 +173,17 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["day_of_week"] = df.index.dayofweek
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
 
-    # پر کردن NaN‌ها
+    # ─── مهم: جایگزینی inf و -inf با NaN، سپس پر کردن ──────
+    n_inf = np.isinf(df).sum().sum()
+    n_neg_inf = np.isneginf(df).sum().sum()
+    if n_inf > 0 or n_neg_inf > 0:
+        logger.warning(f"Found {n_inf} inf and {n_neg_inf} -inf values — replacing with NaN")
+        df = df.replace([np.inf, -np.inf], np.nan)
+
     n_nan_before = df.isna().sum().sum()
     df = df.fillna(0)
     n_nan_after = df.isna().sum().sum()
-    logger.info(f"NaN filled: {n_nan_before} → {n_nan_after}")
+    logger.info(f"NaN/inf filled: {n_nan_before} → {n_nan_after}")
 
     return df
 
@@ -249,10 +273,18 @@ def build_feature_matrix(df_1h: pd.DataFrame,
         if c not in df_1h.columns:
             df_1h[c] = np.nan
 
-    # پر کردن NaN‌های باقیمانده
+    # پر کردن NaN و inf
+    df_1h = df_1h.replace([np.inf, -np.inf], np.nan)
     df_1h = df_1h.fillna(0)
 
-    logger.info(f"Feature matrix: {len(df_1h)} rows x {len(feature_cols)} cols")
+    # بررسی نهایی inf
+    n_inf_final = np.isinf(df_1h[feature_cols]).sum().sum()
+    if n_inf_final > 0:
+        logger.error(f"STILL HAVE {n_inf_final} inf values after cleaning!")
+        # فوراً جایگزین کن
+        df_1h = df_1h.replace([np.inf, -np.inf], 0)
+
+    logger.info(f"Feature matrix: {len(df_1h)} rows x {len(feature_cols)} cols, inf check: {n_inf_final}")
 
     return df_1h[feature_cols].copy()
 
@@ -290,7 +322,6 @@ def create_labels(df_1h: pd.DataFrame,
 
     labels[future_return.isna()] = np.nan
 
-    # آمار برچسب‌ها
     n_long = (labels == 1.0).sum()
     n_short = (labels == -1.0).sum()
     n_wait = (labels == 0.0).sum()
